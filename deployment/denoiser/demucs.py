@@ -1,9 +1,6 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-# author: adefossez
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import math
 import time
@@ -11,9 +8,15 @@ import time
 import torch as th
 from torch import nn
 from torch.nn import functional as F
+import numpy as np
 
-from .resample import downsample2, upsample2
-from .utils import capture_init
+from resample import downsample2, upsample2
+from utils import capture_init
+
+FRAME_SIZE_480 = 480
+PROCESS_SIZE_661 = 661
+STEP_SIZE = 256
+OUTPUT_FRAME_SIZE = 256
 
 
 class BLSTM(nn.Module):
@@ -233,32 +236,32 @@ class DemucsStreamer:
     def __init__(self, demucs,
                  dry=0,
                  num_frames=1,
-                 resample_lookahead=64,
+                 resample_lookahead=128,
                  resample_buffer=256):
         device = next(iter(demucs.parameters())).device
         self.demucs = demucs
         self.lstm_state = None
         self.conv_state = None
-        self.dry = dry
-        self.resample_lookahead = resample_lookahead
-        resample_buffer = min(demucs.total_stride, resample_buffer)
-        self.resample_buffer = resample_buffer
-        self.frame_length = demucs.valid_length(1) + demucs.total_stride * (num_frames - 1)
-        self.total_length = self.frame_length + self.resample_lookahead
-        self.stride = demucs.total_stride * num_frames
-        self.resample_in = th.zeros(demucs.chin, resample_buffer, device=device)
-        self.resample_out = th.zeros(demucs.chin, resample_buffer, device=device)
+        self.dry = dry# 0
+        self.resample_lookahead = resample_lookahead# 64
+        resample_buffer = min(demucs.total_stride, resample_buffer)# 256
+        self.resample_buffer = resample_buffer# 256
+        self.frame_length = demucs.valid_length(1) + demucs.total_stride * (num_frames - 1)# 597
+        self.total_length = self.frame_length + self.resample_lookahead# 661
+        self.stride = demucs.total_stride * num_frames# 256
+        self.resample_in = th.zeros(demucs.chin, resample_buffer, device=device)# [1,256]
+        self.resample_out = th.zeros(demucs.chin, resample_buffer, device=device)# [1,256]
 
         self.frames = 0
         self.total_time = 0
         self.variance = 0
-        self.pending = th.zeros(demucs.chin, 0, device=device)
+        self.pending = th.zeros(demucs.chin, 0, device=device)# [1,0]
 
-        bias = demucs.decoder[0][2].bias
-        weight = demucs.decoder[0][2].weight
-        chin, chout, kernel = weight.shape
-        self._bias = bias.view(-1, 1).repeat(1, kernel).view(-1, 1)
-        self._weight = weight.permute(1, 2, 0).contiguous()
+        bias = demucs.decoder[0][2].bias# [384]
+        weight = demucs.decoder[0][2].weight# [768,384,8]
+        chin, chout, kernel = weight.shape# kernel:8
+        self._bias = bias.view(-1, 1).repeat(1, kernel).view(-1, 1)# [3072,1]
+        self._weight = weight.permute(1, 2, 0).contiguous()# [384,8,768]
 
     def reset_time_per_frame(self):
         self.total_time = 0
@@ -299,35 +302,35 @@ class DemucsStreamer:
         outs = []
         while self.pending.shape[1] >= self.total_length:
             self.frames += 1
-            frame = self.pending[:, :self.total_length]
-            dry_signal = frame[:, :stride]
+            frame = self.pending[:, :self.total_length]#[1,661]
+            dry_signal = frame[:, :stride]#[1,256]
             if demucs.normalize:
                 mono = frame.mean(0)
                 variance = (mono**2).mean()
                 self.variance = variance / self.frames + (1 - 1 / self.frames) * self.variance
                 frame = frame / (demucs.floor + math.sqrt(self.variance))
-            frame = th.cat([self.resample_in, frame], dim=-1)
-            self.resample_in[:] = frame[:, stride - resample_buffer:stride]
+            frame = th.cat([self.resample_in, frame], dim=-1)#[1,917]
+            self.resample_in[:] = frame[:, stride - resample_buffer:stride]#[1,256]
 
             if resample == 4:
-                frame = upsample2(upsample2(frame))
+                frame = upsample2(upsample2(frame))#[1,3668]
             elif resample == 2:
                 frame = upsample2(frame)
-            frame = frame[:, resample * resample_buffer:]  # remove pre sampling buffer
-            frame = frame[:, :resample * self.frame_length]  # remove extra samples after window
+            frame = frame[:, resample * resample_buffer:]#[1,1024:]  # remove pre sampling buffer
+            frame = frame[:, :resample * self.frame_length]#[1,:2388]  # remove extra samples after window
 
-            out, extra = self._separate_frame(frame)
-            padded_out = th.cat([self.resample_out, out, extra], 1)
-            self.resample_out[:] = out[:, -resample_buffer:]
+            out, extra = self._separate_frame(frame)#out:[1,1024] #extra:[1,1364]
+            padded_out = th.cat([self.resample_out, out, extra], 1)#[1,2644]
+            self.resample_out[:] = out[:, -resample_buffer:]#self.resample_out:[1,256]
             if resample == 4:
-                out = downsample2(downsample2(padded_out))
+                out = downsample2(downsample2(padded_out))#[1,661]
             elif resample == 2:
                 out = downsample2(padded_out)
             else:
                 out = padded_out
 
-            out = out[:, resample_buffer // resample:]
-            out = out[:, :stride]
+            out = out[:, resample_buffer // resample:]#[1,597]
+            out = out[:, :stride]#[1,256]
 
             if demucs.normalize:
                 out *= math.sqrt(self.variance)
@@ -410,8 +413,377 @@ class DemucsStreamer:
         return x[0], extra[0]
 
 
+class RingBuffer:
+    def __init__(self, element_count, element_size):
+        self.size = element_count
+        self.element_size = element_size
+        self.buffer = np.zeros(element_count, dtype=np.float32)  # Assuming data type from C++ (float)
+        self.write_index = 0
+        self.read_index = 0
+
+    def write(self, data):
+        data_length = len(data)
+        first_part_len = min(data_length, self.size - self.write_index)
+        self.buffer[self.write_index:self.write_index + first_part_len] = data[:first_part_len]
+        second_part_len = data_length - first_part_len
+        if second_part_len > 0:
+            self.buffer[:second_part_len] = data[first_part_len:first_part_len + second_part_len]
+        self.write_index = (self.write_index + data_length) % self.size
+        return data_length
+
+    def read(self, element_count):
+        first_part_len = min(element_count, self.size - self.read_index)
+        data = self.buffer[self.read_index:self.read_index + first_part_len]
+        second_part_len = element_count - first_part_len
+        if second_part_len > 0:
+            data = np.concatenate((data, self.buffer[:second_part_len]))
+        self.read_index = (self.read_index + element_count) % self.size
+        return data
+
+    def move_read_pointer(self, element_count):
+        self.read_index = (self.read_index + element_count) % self.size
+        return element_count
+
+    def available_to_read(self):
+        return (self.write_index - self.read_index + self.size) % self.size
+
+    def available_to_write(self):
+        return self.size - self.available_to_read()
+
+
+# class RingBuffer:
+#     def __init__(self, element_count, element_size):
+#         self.size = element_count
+#         self.element_size = element_size
+#         self.buffer = torch.zeros(element_count, dtype=torch.float32)  # Use torch tensor
+#         self.write_index = 0
+#         self.read_index = 0
+
+#     def write(self, data):
+#         data_length = len(data)
+#         first_part_len = min(data_length, self.size - self.write_index)
+#         self.buffer[self.write_index:self.write_index + first_part_len] = data[:first_part_len]
+#         second_part_len = data_length - first_part_len
+#         if second_part_len > 0:
+#             self.buffer[:second_part_len] = data[first_part_len:first_part_len + second_part_len]
+#         self.write_index = (self.write_index + data_length) % self.size
+#         return data_length
+
+#     def read(self, element_count):
+#         first_part_len = min(element_count, self.size - self.read_index)
+#         data = self.buffer[self.read_index:self.read_index + first_part_len]
+#         second_part_len = element_count - first_part_len
+#         if second_part_len > 0:
+#             data = torch.cat((data, self.buffer[:second_part_len]))
+#         self.read_index = (self.read_index + element_count) % self.size
+#         return data
+
+#     def move_read_pointer(self, element_count):
+#         self.read_index = (self.read_index + element_count) % self.size
+#         return element_count
+
+#     def available_to_read(self):
+#         return (self.write_index - self.read_index + self.size) % self.size
+
+#     def available_to_write(self):
+#         return self.size - self.available_to_read()
+
+
+class AudioRingBuffer:
+    def __init__(self, channels, max_frames):
+        self.channels = channels
+        self.max_frames = max_frames
+        self.buffers = [RingBuffer(max_frames, 1) for _ in range(channels)]
+
+    def write(self, data):
+        if len(data) != self.channels:
+            return  # Handle channel mismatch as in C++ code
+        for i, channel_data in enumerate(data):
+            self.buffers[i].write(channel_data)
+
+    def read(self, frames):
+        return [self.buffers[i].read(frames) for i in range(self.channels)]
+
+    def available_to_read(self):
+        return min(buffer.available_to_read() for buffer in self.buffers)
+
+    def available_to_write(self):
+        return min(buffer.available_to_write() for buffer in self.buffers)
+
+# class AudioRingBuffer:
+#     def __init__(self, channels, max_frames):
+#         self.channels = channels
+#         self.max_frames = max_frames
+#         self.buffers = [RingBuffer(max_frames, 1) for _ in range(channels)]
+
+#     def write(self, data):
+#         if len(data) != self.channels:
+#             return  # Handle channel mismatch as in C++ code
+#         for i, channel_data in enumerate(data):
+#             self.buffers[i].write(channel_data)
+
+#     def read(self, frames):
+#         return [self.buffers[i].read(frames) for i in range(self.channels)]
+
+#     def available_to_read(self):
+#         return min(buffer.available_to_read() for buffer in self.buffers)
+
+#     def available_to_write(self):
+#         return min(buffer.available_to_write() for buffer in self.buffers)
+
+
+
+
+class DemucsStreamer_RT:
+    def __init__(self, demucs,
+                 dry=0,
+                 num_frames=1,
+                 resample_lookahead=64,
+                 resample_buffer=256):
+        device = next(iter(demucs.parameters())).device
+        self.demucs = demucs
+        self.lstm_state = None
+        self.conv_state = None
+        # self.dry = dry# 0
+        self.resample_buf_size_256 = 256# 256
+        self.frame_length = demucs.valid_length(1)# 597
+        self.total_length = 661
+        self.stride_size = demucs.total_stride# 256
+        self.resample_in = th.zeros(demucs.chin, self.resample_buf_size_256, device=device)# [1,256]
+        self.resample_out = th.zeros(demucs.chin, self.resample_buf_size_256, device=device)# [1,256]
+
+        self.frames = 0
+        self.total_time = 0
+        self.variance = 0
+        self.pending = th.zeros(demucs.chin, 0, device=device)# [1,0]
+        self.counter = 0
+
+        bias = demucs.decoder[0][2].bias# [384]
+        weight = demucs.decoder[0][2].weight# [768,384,8]
+        _, _, kernel = weight.shape# kernel:8
+        self._bias = bias.view(-1, 1).repeat(1, kernel).view(-1, 1)# [3072,1]
+        self._weight = weight.permute(1, 2, 0).contiguous()# [384,8,768]
+
+        self.in_buf_1024 = AudioRingBuffer(1,1024)
+        self.out_buf_1024 = AudioRingBuffer(1,1024)
+        # self.out_buf_1024.write(th.as_tensor(np.zeros(661)))
+        self.process_buf_661 = th.as_tensor( np.zeros((1,PROCESS_SIZE_661)), dtype=th.float32 )
+        # self.tmp_out_480 = th.as_tensor( np.zeros((1,480)), dtype=th.float32 )
+        self.tmp_out_480 = np.zeros(480)
+        
+
+
+    # def feed(self, wav):
+    #     """
+    #     Apply the model to mix using true real time evaluation.
+    #     Normalization is done online as is the resampling.
+    #     """
+    #     begin = time.time()
+    #     demucs = self.demucs
+    #     resample_buffer = self.resample_buffer
+    #     stride = self.stride
+    #     resample = demucs.resample
+
+    #     if wav.dim() != 2:
+    #         raise ValueError("input wav should be two dimensional.")
+    #     chin, _ = wav.shape
+    #     if chin != demucs.chin:
+    #         raise ValueError(f"Expected {demucs.chin} channels, got {chin}")
+
+    #     self.pending = th.cat([self.pending, wav], dim=1)
+    #     outs = []
+    #     while self.pending.shape[1] >= self.total_length:
+    #         self.frames += 1
+    #         frame = self.pending[:, :self.total_length]#[1,661]
+    #         dry_signal = frame[:, :stride]#[1,256]
+    #         if demucs.normalize:
+    #             mono = frame.mean(0)
+    #             variance = (mono**2).mean()
+    #             self.variance = variance / self.frames + (1 - 1 / self.frames) * self.variance
+    #             frame = frame / (demucs.floor + math.sqrt(self.variance))
+    #         frame = th.cat([self.resample_in, frame], dim=-1)#[1,917]
+    #         self.resample_in[:] = frame[:, stride - resample_buffer:stride]#[1,256]
+
+    #         if resample == 4:
+    #             frame = upsample2(upsample2(frame))#[1,3668]
+    #         elif resample == 2:
+    #             frame = upsample2(frame)
+    #         frame = frame[:, resample * resample_buffer:]#[1,1024:]  # remove pre sampling buffer
+    #         frame = frame[:, :resample * self.frame_length]#[1,:2388]  # remove extra samples after window
+
+    #         out, extra = self._separate_frame(frame)#out:[1,1024] #extra:[1,1364]
+    #         padded_out = th.cat([self.resample_out, out, extra], 1)#[1,2644]
+    #         self.resample_out[:] = out[:, -resample_buffer:]#self.resample_out:[1,256]
+    #         if resample == 4:
+    #             out = downsample2(downsample2(padded_out))#[1,661]
+    #         elif resample == 2:
+    #             out = downsample2(padded_out)
+    #         else:
+    #             out = padded_out
+
+    #         out = out[:, resample_buffer // resample:]#[1,597]
+    #         out = out[:, :stride]#[1,256]
+
+    #         if demucs.normalize:
+    #             out *= math.sqrt(self.variance)
+    #         out = self.dry * dry_signal + (1 - self.dry) * out
+    #         outs.append(out)
+    #         self.pending = self.pending[:, stride:]
+
+    #     self.total_time += time.time() - begin
+    #     if outs:
+    #         out = th.cat(outs, 1)
+    #     else:
+    #         out = th.zeros(chin, 0, device=wav.device)
+    #     return out
+    
+    def processBlock(self, new_frame_480):
+        self.counter+=1
+
+        # push 480 new data into in_buf_960
+        if self.in_buf_1024.available_to_write():
+            self.in_buf_1024.write(new_frame_480)
+        else:
+            print("in_buf_1024 push error")
+
+        # process if buffer_size>661
+        while(self.in_buf_1024.available_to_read() >= STEP_SIZE):
+            #once process need 661 samples at least 
+            # self.process_buf_661 = self.in_buf_1024.read(PROCESS_SIZE_661)
+            self.process_buf_661[:,:-STEP_SIZE] = self.process_buf_661[:,STEP_SIZE:].clone()
+            self.process_buf_661[:,-STEP_SIZE:] = th.as_tensor(self.in_buf_1024.read(STEP_SIZE),dtype=th.float32)
+
+            #process
+            frame = self.process_buf_661#.unsqueeze(0)#[1,661]
+            if self.demucs.normalize:
+                mono = frame.mean(0)
+                self.variance = (mono**2).mean()
+                # self.variance = variance / self.frames + (1 - 1 / self.frames) * self.variance
+                frame = frame / (self.demucs.floor + math.sqrt(self.variance))
+            frame = th.cat([self.resample_in, frame], dim=-1)#[1,917]
+            self.resample_in[:] = frame[:, self.stride_size - self.resample_buf_size_256:self.stride_size]#[1,256]
+
+            if self.demucs.resample == 4:
+                frame = upsample2(upsample2(frame))#[1,3668]
+            elif self.demucs.resample == 2:
+                frame = upsample2(frame)
+            frame = frame[:, self.demucs.resample * self.resample_buf_size_256:]#[1,1024:]  # remove pre sampling buffer
+            frame = frame[:, :self.demucs.resample * self.frame_length]#[1,:2388]  # remove extra samples after window
+
+            out, extra = self._separate_frame(frame)#out:[1,1024] #extra:[1,1364]
+            padded_out = th.cat([self.resample_out, out, extra], 1)#[1,2644]
+            self.resample_out[:] = out[:, -self.resample_buf_size_256:]#self.resample_out:[1,256]
+            if self.demucs.resample == 4:
+                out = downsample2(downsample2(padded_out))#[1,661]
+            else:
+                print("downresample error")
+            out = out[:, self.resample_buf_size_256 // self.demucs.resample:]#[1,597]
+            out = out[:, :self.stride_size]#[1,256]
+
+            if self.demucs.normalize:
+                out *= math.sqrt(self.variance)
+
+            # push output into out_buf_960
+
+            if self.out_buf_1024.available_to_write()>=STEP_SIZE:
+                # self.out_buf_1024.write( (self.process_buf_661[:,0:STEP_SIZE]).detach().numpy() )
+                self.out_buf_1024.write( out.detach().numpy() )
+            else:
+                print("out_buf_1024 push error")
+                print("COUNTER = ",self.counter)
+                
+                
+            
+            # self.out_buf_1024.write(out)
+            # self.in_buf_1024.start = (self.in_buf_1024.start+STEP_SIZE)%1024
+
+        # pop 480 new data
+        if(self.out_buf_1024.available_to_read() >= FRAME_SIZE_480):
+            # self.tmp_out_480 = self.out_buf_1024.read(FRAME_SIZE_480)
+            xxx = self.out_buf_1024.read(FRAME_SIZE_480)[0]
+            self.tmp_out_480 = xxx
+        else:
+            print("output buffer pop error")
+            print("COUNTER = ",self.counter)
+
+        # return self.tmp_out_480.detach().numpy()
+        return self.tmp_out_480
+
+
+
+    def _separate_frame(self, frame):
+        # demucs = self.demucs
+        skips = []
+        next_state = []
+        first = self.conv_state is None
+        stride = self.stride_size * self.demucs.resample
+        x = frame[None]
+        for idx, encode in enumerate(self.demucs.encoder):
+            stride //= self.demucs.stride
+            length = x.shape[2]
+            if idx == self.demucs.depth - 1:
+                # This is sligthly faster for the last conv
+                x = fast_conv(encode[0], x)
+                x = encode[1](x)
+                x = fast_conv(encode[2], x)
+                x = encode[3](x)
+            else:
+                if not first:
+                    prev = self.conv_state.pop(0)
+                    prev = prev[..., stride:]
+                    tgt = (length - self.demucs.kernel_size) // self.demucs.stride + 1
+                    missing = tgt - prev.shape[-1]
+                    offset = length - self.demucs.kernel_size - self.demucs.stride * (missing - 1)
+                    x = x[..., offset:]
+                x = encode[1](encode[0](x))
+                x = fast_conv(encode[2], x)
+                x = encode[3](x)
+                if not first:
+                    x = th.cat([prev, x], -1)
+                next_state.append(x)
+            skips.append(x)
+
+        x = x.permute(2, 0, 1)
+        x, self.lstm_state = self.demucs.lstm(x, self.lstm_state)
+        x = x.permute(1, 2, 0)
+        # In the following, x contains only correct samples, i.e. the one
+        # for which each time position is covered by two window of the upper layer.
+        # extra contains extra samples to the right, and is used only as a
+        # better padding for the online resampling.
+        extra = None
+        for idx, decode in enumerate(self.demucs.decoder):
+            skip = skips.pop(-1)
+            x += skip[..., :x.shape[-1]]
+            x = fast_conv(decode[0], x)
+            x = decode[1](x)
+
+            if extra is not None:
+                skip = skip[..., x.shape[-1]:]
+                extra += skip[..., :extra.shape[-1]]
+                extra = decode[2](decode[1](decode[0](extra)))
+            x = decode[2](x)
+            next_state.append(x[..., -self.demucs.stride:] - decode[2].bias.view(-1, 1))
+            if extra is None:
+                extra = x[..., -self.demucs.stride:]
+            else:
+                extra[..., :self.demucs.stride] += next_state[-1]
+            x = x[..., :-self.demucs.stride]
+
+            if not first:
+                prev = self.conv_state.pop(0)
+                x[..., :self.demucs.stride] += prev
+            if idx != self.demucs.depth - 1:
+                x = decode[3](x)
+                extra = decode[3](extra)
+        self.conv_state = next_state
+        return x[0], extra[0]
+    
+
+
 def test():
     import argparse
+    import soundfile as sf
+    import torch
     parser = argparse.ArgumentParser(
         "denoiser.demucs",
         description="Benchmark the streaming Demucs implementation, "
@@ -428,9 +800,17 @@ def test():
         th.set_num_threads(args.num_threads)
     sr = args.sample_rate
     sr_ms = sr / 1000
+    # x = th.randn(1, int(sr * 4)).to(args.device)
+    x,samplerate = sf.read("/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav/input_noise_car_talk.wav")
+    x = torch.as_tensor(x,dtype=torch.float32).squeeze(0).squeeze(0)
+    
+    
     demucs = Demucs(depth=args.depth, hidden=args.hidden, resample=args.resample).to(args.device)
-    x = th.randn(1, int(sr * 4)).to(args.device)
     out = demucs(x[None])[0]
+
+    sf.write("/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav/output_noise_car_talk_all_data.wav",out.squeeze(0).detach().numpy(),48000)
+
+
     streamer = DemucsStreamer(demucs, num_frames=args.num_frames)
     out_rt = []
     frame_size = streamer.total_length
@@ -445,7 +825,7 @@ def test():
     initial_lag = streamer.total_length / sr_ms
     tpf = 1000 * streamer.time_per_frame
     print(f"model size: {model_size:.1f}MB, ", end='')
-    print(f"delta batch/streaming: {th.norm(out - out_rt) / th.norm(out):.2%}")
+    print(f"delta batch/streaming: {th.norm(out - out_rt[:,:64000]) / th.norm(out):.2%}")
     print(f"initial lag: {initial_lag:.1f}ms, ", end='')
     print(f"stride: {streamer.stride * args.num_frames / sr_ms:.1f}ms")
     print(f"time per frame: {tpf:.1f}ms, ", end='')

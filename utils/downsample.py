@@ -1,5 +1,7 @@
 # save to a different directory for easier creating of the necessary json files
-
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from pydub import AudioSegment as am
 import os
 
