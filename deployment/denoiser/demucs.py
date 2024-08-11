@@ -451,44 +451,6 @@ class RingBuffer:
         return self.size - self.available_to_read()
 
 
-# class RingBuffer:
-#     def __init__(self, element_count, element_size):
-#         self.size = element_count
-#         self.element_size = element_size
-#         self.buffer = torch.zeros(element_count, dtype=torch.float32)  # Use torch tensor
-#         self.write_index = 0
-#         self.read_index = 0
-
-#     def write(self, data):
-#         data_length = len(data)
-#         first_part_len = min(data_length, self.size - self.write_index)
-#         self.buffer[self.write_index:self.write_index + first_part_len] = data[:first_part_len]
-#         second_part_len = data_length - first_part_len
-#         if second_part_len > 0:
-#             self.buffer[:second_part_len] = data[first_part_len:first_part_len + second_part_len]
-#         self.write_index = (self.write_index + data_length) % self.size
-#         return data_length
-
-#     def read(self, element_count):
-#         first_part_len = min(element_count, self.size - self.read_index)
-#         data = self.buffer[self.read_index:self.read_index + first_part_len]
-#         second_part_len = element_count - first_part_len
-#         if second_part_len > 0:
-#             data = torch.cat((data, self.buffer[:second_part_len]))
-#         self.read_index = (self.read_index + element_count) % self.size
-#         return data
-
-#     def move_read_pointer(self, element_count):
-#         self.read_index = (self.read_index + element_count) % self.size
-#         return element_count
-
-#     def available_to_read(self):
-#         return (self.write_index - self.read_index + self.size) % self.size
-
-#     def available_to_write(self):
-#         return self.size - self.available_to_read()
-
-
 class AudioRingBuffer:
     def __init__(self, channels, max_frames):
         self.channels = channels
@@ -509,29 +471,6 @@ class AudioRingBuffer:
 
     def available_to_write(self):
         return min(buffer.available_to_write() for buffer in self.buffers)
-
-# class AudioRingBuffer:
-#     def __init__(self, channels, max_frames):
-#         self.channels = channels
-#         self.max_frames = max_frames
-#         self.buffers = [RingBuffer(max_frames, 1) for _ in range(channels)]
-
-#     def write(self, data):
-#         if len(data) != self.channels:
-#             return  # Handle channel mismatch as in C++ code
-#         for i, channel_data in enumerate(data):
-#             self.buffers[i].write(channel_data)
-
-#     def read(self, frames):
-#         return [self.buffers[i].read(frames) for i in range(self.channels)]
-
-#     def available_to_read(self):
-#         return min(buffer.available_to_read() for buffer in self.buffers)
-
-#     def available_to_write(self):
-#         return min(buffer.available_to_write() for buffer in self.buffers)
-
-
 
 
 class DemucsStreamer_RT:
@@ -566,77 +505,13 @@ class DemucsStreamer_RT:
 
         self.in_buf_1024 = AudioRingBuffer(1,1024)
         self.out_buf_1024 = AudioRingBuffer(1,1024)
+        self.out_buf_1024.write( th.as_tensor(np.zeros((1,480)), dtype=th.float32) )
         # self.out_buf_1024.write(th.as_tensor(np.zeros(661)))
         self.process_buf_661 = th.as_tensor( np.zeros((1,PROCESS_SIZE_661)), dtype=th.float32 )
         # self.tmp_out_480 = th.as_tensor( np.zeros((1,480)), dtype=th.float32 )
         self.tmp_out_480 = np.zeros(480)
         
 
-
-    # def feed(self, wav):
-    #     """
-    #     Apply the model to mix using true real time evaluation.
-    #     Normalization is done online as is the resampling.
-    #     """
-    #     begin = time.time()
-    #     demucs = self.demucs
-    #     resample_buffer = self.resample_buffer
-    #     stride = self.stride
-    #     resample = demucs.resample
-
-    #     if wav.dim() != 2:
-    #         raise ValueError("input wav should be two dimensional.")
-    #     chin, _ = wav.shape
-    #     if chin != demucs.chin:
-    #         raise ValueError(f"Expected {demucs.chin} channels, got {chin}")
-
-    #     self.pending = th.cat([self.pending, wav], dim=1)
-    #     outs = []
-    #     while self.pending.shape[1] >= self.total_length:
-    #         self.frames += 1
-    #         frame = self.pending[:, :self.total_length]#[1,661]
-    #         dry_signal = frame[:, :stride]#[1,256]
-    #         if demucs.normalize:
-    #             mono = frame.mean(0)
-    #             variance = (mono**2).mean()
-    #             self.variance = variance / self.frames + (1 - 1 / self.frames) * self.variance
-    #             frame = frame / (demucs.floor + math.sqrt(self.variance))
-    #         frame = th.cat([self.resample_in, frame], dim=-1)#[1,917]
-    #         self.resample_in[:] = frame[:, stride - resample_buffer:stride]#[1,256]
-
-    #         if resample == 4:
-    #             frame = upsample2(upsample2(frame))#[1,3668]
-    #         elif resample == 2:
-    #             frame = upsample2(frame)
-    #         frame = frame[:, resample * resample_buffer:]#[1,1024:]  # remove pre sampling buffer
-    #         frame = frame[:, :resample * self.frame_length]#[1,:2388]  # remove extra samples after window
-
-    #         out, extra = self._separate_frame(frame)#out:[1,1024] #extra:[1,1364]
-    #         padded_out = th.cat([self.resample_out, out, extra], 1)#[1,2644]
-    #         self.resample_out[:] = out[:, -resample_buffer:]#self.resample_out:[1,256]
-    #         if resample == 4:
-    #             out = downsample2(downsample2(padded_out))#[1,661]
-    #         elif resample == 2:
-    #             out = downsample2(padded_out)
-    #         else:
-    #             out = padded_out
-
-    #         out = out[:, resample_buffer // resample:]#[1,597]
-    #         out = out[:, :stride]#[1,256]
-
-    #         if demucs.normalize:
-    #             out *= math.sqrt(self.variance)
-    #         out = self.dry * dry_signal + (1 - self.dry) * out
-    #         outs.append(out)
-    #         self.pending = self.pending[:, stride:]
-
-    #     self.total_time += time.time() - begin
-    #     if outs:
-    #         out = th.cat(outs, 1)
-    #     else:
-    #         out = th.zeros(chin, 0, device=wav.device)
-    #     return out
-    
     def processBlock(self, new_frame_480):
         self.counter+=1
 
@@ -692,21 +567,14 @@ class DemucsStreamer_RT:
                 print("out_buf_1024 push error")
                 print("COUNTER = ",self.counter)
                 
-                
-            
-            # self.out_buf_1024.write(out)
-            # self.in_buf_1024.start = (self.in_buf_1024.start+STEP_SIZE)%1024
-
         # pop 480 new data
         if(self.out_buf_1024.available_to_read() >= FRAME_SIZE_480):
             # self.tmp_out_480 = self.out_buf_1024.read(FRAME_SIZE_480)
-            xxx = self.out_buf_1024.read(FRAME_SIZE_480)[0]
-            self.tmp_out_480 = xxx
+            self.tmp_out_480 = self.out_buf_1024.read(FRAME_SIZE_480)[0]
         else:
             print("output buffer pop error")
             print("COUNTER = ",self.counter)
 
-        # return self.tmp_out_480.detach().numpy()
         return self.tmp_out_480
 
 
@@ -780,58 +648,59 @@ class DemucsStreamer_RT:
     
 
 
-def test():
-    import argparse
-    import soundfile as sf
-    import torch
-    parser = argparse.ArgumentParser(
-        "denoiser.demucs",
-        description="Benchmark the streaming Demucs implementation, "
-                    "as well as checking the delta with the offline implementation.")
-    parser.add_argument("--depth", default=5, type=int)
-    parser.add_argument("--resample", default=4, type=int)
-    parser.add_argument("--hidden", default=48, type=int)
-    parser.add_argument("--sample_rate", default=16000, type=float)
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument("-t", "--num_threads", type=int)
-    parser.add_argument("-f", "--num_frames", type=int, default=1)
-    args = parser.parse_args()
-    if args.num_threads:
-        th.set_num_threads(args.num_threads)
-    sr = args.sample_rate
-    sr_ms = sr / 1000
-    # x = th.randn(1, int(sr * 4)).to(args.device)
-    x,samplerate = sf.read("/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav/input_noise_car_talk.wav")
-    x = torch.as_tensor(x,dtype=torch.float32).squeeze(0).squeeze(0)
+# def test():
+#     import argparse
+#     import soundfile as sf
+#     import torch
+#     parser = argparse.ArgumentParser(
+#         "denoiser.demucs",
+#         description="Benchmark the streaming Demucs implementation, "
+#                     "as well as checking the delta with the offline implementation.")
+#     parser.add_argument("--depth", default=5, type=int)
+#     parser.add_argument("--resample", default=4, type=int)
+#     parser.add_argument("--hidden", default=48, type=int)
+#     parser.add_argument("--sample_rate", default=16000, type=float)
+#     parser.add_argument("--device", default="cpu")
+#     parser.add_argument("-t", "--num_threads", type=int)
+#     parser.add_argument("-f", "--num_frames", type=int, default=1)
+#     args = parser.parse_args()
+#     if args.num_threads:
+#         th.set_num_threads(args.num_threads)
+#     sr = args.sample_rate
+#     sr_ms = sr / 1000
+#     # x = th.randn(1, int(sr * 4)).to(args.device)
+#     x,samplerate = sf.read("/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav/input_noise_car_talk.wav")
+#     x = torch.as_tensor(x,dtype=torch.float32).squeeze(0).squeeze(0)
     
     
-    demucs = Demucs(depth=args.depth, hidden=args.hidden, resample=args.resample).to(args.device)
-    out = demucs(x[None])[0]
+#     demucs = Demucs(depth=args.depth, hidden=args.hidden, resample=args.resample).to(args.device)
+#     out = demucs(x[None])[0]
 
-    sf.write("/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav/output_noise_car_talk_all_data.wav",out.squeeze(0).detach().numpy(),48000)
+#     sf.write("/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav/output_noise_car_talk_all_data.wav",out.squeeze(0).detach().numpy(),48000)
 
 
-    streamer = DemucsStreamer(demucs, num_frames=args.num_frames)
-    out_rt = []
-    frame_size = streamer.total_length
-    with th.no_grad():
-        while x.shape[1] > 0:
-            out_rt.append(streamer.feed(x[:, :frame_size]))
-            x = x[:, frame_size:]
-            frame_size = streamer.demucs.total_stride
-    out_rt.append(streamer.flush())
-    out_rt = th.cat(out_rt, 1)
-    model_size = sum(p.numel() for p in demucs.parameters()) * 4 / 2**20
-    initial_lag = streamer.total_length / sr_ms
-    tpf = 1000 * streamer.time_per_frame
-    print(f"model size: {model_size:.1f}MB, ", end='')
-    print(f"delta batch/streaming: {th.norm(out - out_rt[:,:64000]) / th.norm(out):.2%}")
-    print(f"initial lag: {initial_lag:.1f}ms, ", end='')
-    print(f"stride: {streamer.stride * args.num_frames / sr_ms:.1f}ms")
-    print(f"time per frame: {tpf:.1f}ms, ", end='')
-    print(f"RTF: {((1000 * streamer.time_per_frame) / (streamer.stride / sr_ms)):.2f}")
-    print(f"Total lag with computation: {initial_lag + tpf:.1f}ms")
+#     streamer = DemucsStreamer(demucs, num_frames=args.num_frames)
+#     out_rt = []
+#     frame_size = streamer.total_length
+#     with th.no_grad():
+#         while x.shape[1] > 0:
+#             out_rt.append(streamer.feed(x[:, :frame_size]))
+#             x = x[:, frame_size:]
+#             frame_size = streamer.demucs.total_stride
+#     out_rt.append(streamer.flush())
+#     out_rt = th.cat(out_rt, 1)
+#     model_size = sum(p.numel() for p in demucs.parameters()) * 4 / 2**20
+#     initial_lag = streamer.total_length / sr_ms
+#     tpf = 1000 * streamer.time_per_frame
+#     print(f"model size: {model_size:.1f}MB, ", end='')
+#     print(f"delta batch/streaming: {th.norm(out - out_rt[:,:64000]) / th.norm(out):.2%}")
+#     print(f"initial lag: {initial_lag:.1f}ms, ", end='')
+#     print(f"stride: {streamer.stride * args.num_frames / sr_ms:.1f}ms")
+#     print(f"time per frame: {tpf:.1f}ms, ", end='')
+#     print(f"RTF: {((1000 * streamer.time_per_frame) / (streamer.stride / sr_ms)):.2f}")
+#     print(f"Total lag with computation: {initial_lag + tpf:.1f}ms")
 
 
 if __name__ == "__main__":
-    test()
+    # test()
+    xxx = 1

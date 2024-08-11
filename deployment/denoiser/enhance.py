@@ -20,6 +20,7 @@ from utils import LogProgress
 
 
 import soundfile as sf
+from tqdm import *
 # this version is for running from within python
 # from audio import Audioset, find_audio_files
 # import pretrained
@@ -53,37 +54,37 @@ streaming = True
 verbose = 20
 
 
-def add_flags(parser):
-    """
-    Add the flags for the argument parser that are related to model loading and evaluation"
-    """
-    add_model_flags(parser)
-    parser.add_argument('--device', default="cpu")
-    parser.add_argument('--dry', type=float, default=0,
-                        help='dry/wet knob coefficient. 0 is only input signal, 1 only denoised.')
-    parser.add_argument('--sample_rate', default=16000, type=int, help='sample rate')
-    parser.add_argument('--num_workers', type=int, default=10)
-    parser.add_argument('--streaming', action="store_true",
-                        help="true streaming evaluation for Demucs")
+# def add_flags(parser):
+#     """
+#     Add the flags for the argument parser that are related to model loading and evaluation"
+#     """
+#     add_model_flags(parser)
+#     parser.add_argument('--device', default="cpu")
+#     parser.add_argument('--dry', type=float, default=0,
+#                         help='dry/wet knob coefficient. 0 is only input signal, 1 only denoised.')
+#     parser.add_argument('--sample_rate', default=16000, type=int, help='sample rate')
+#     parser.add_argument('--num_workers', type=int, default=10)
+#     parser.add_argument('--streaming', action="store_true",
+#                         help="true streaming evaluation for Demucs")
 
 
-parser = argparse.ArgumentParser(
-        'denoiser.enhance',
-        description="Speech enhancement using Demucs - Generate enhanced files")
-add_flags(parser)
-parser.add_argument("--out_dir", type=str, default="/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav",
-                    help="directory putting enhanced wav files")
-parser.add_argument("--batch_size", default=1, type=int, help="batch size")
-parser.add_argument('-v', '--verbose', action='store_const', const=logging.DEBUG,
-                    default=logging.INFO, help="more loggging")
-# new arg for file location
-parser.add_argument('-f', '--file_location', type=str, default="/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav/input_noise_car_talk.wav", help="file path for the .wav file")
+# parser = argparse.ArgumentParser(
+#         'denoiser.enhance',
+#         description="Speech enhancement using Demucs - Generate enhanced files")
+# add_flags(parser)
+# parser.add_argument("--out_dir", type=str, default="/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav",
+#                     help="directory putting enhanced wav files")
+# parser.add_argument("--batch_size", default=1, type=int, help="batch size")
+# parser.add_argument('-v', '--verbose', action='store_const', const=logging.DEBUG,
+#                     default=logging.INFO, help="more loggging")
+# # new arg for file location
+# parser.add_argument('-f', '--file_location', type=str, default="/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav/input_noise_car_talk.wav", help="file path for the .wav file")
 
-group = parser.add_mutually_exclusive_group()
-group.add_argument("--noisy_dir", type=str, default=None,
-                   help="directory including noisy wav files")
-group.add_argument("--noisy_json", type=str, default=None,
-                   help="json file including noisy wav files")
+# group = parser.add_mutually_exclusive_group()
+# group.add_argument("--noisy_dir", type=str, default=None,
+#                    help="directory including noisy wav files")
+# group.add_argument("--noisy_json", type=str, default=None,
+#                    help="json file including noisy wav files")
 
 
 def get_estimate(model, noisy, dry):
@@ -119,42 +120,6 @@ def get_dataset_fast_api_version(file_location):
     length = siginfo.length // siginfo.channels
     files.append((file_location, length))
     return Audioset(files, with_path=True, sample_rate=sample_rate)
-
-
-# with file_location
-# def enhance(model_path, noisy_dir, file_location, out_dir, noisy_json, sample_rate,
-#             batch_size, device, num_workers, dns48, dns64, master64,
-#             dry, streaming, verbose,
-#             model=None, local_out_dir=None):
-#     # Load model
-#     if not model:
-#         # Relies on get_model to load from path
-#         # model = pretrained.get_model(args).to(device)
-#         model = get_model(model_path).to(device)
-#     model.eval()
-#     if local_out_dir:
-#         # Uses local_out_dir on call to enhance function
-#         out_dir = local_out_dir
-#     else:
-#         out_dir = out_dir
-
-#     # Fast API version using a file rather than a noisy_dir
-#     dset = get_dataset_fast_api_version(file_location)
-
-#     loader = DataLoader(dset, batch_size=1)
-    
-#     os.makedirs(out_dir, exist_ok=True)
-
-#     with ProcessPoolExecutor(num_workers) as pool:
-#         iterator = LogProgress(logger, loader, name="Generate enhanced files")
-#         for data in iterator:
-#             # Get batch data
-#             noisy_signals, filenames = data
-#             noisy_signals = noisy_signals.to(device)
-            
-#             # Forward
-#             estimate = get_estimate(model, noisy_signals, dry)
-#             save_wavs(estimate, noisy_signals, filenames, out_dir, sr=sample_rate)
 
 def enhance(model_path, noisy_dir, file_location, out_dir, noisy_json, sample_rate,
             batch_size, device, num_workers, dns48, dns64, master64,
@@ -194,34 +159,21 @@ def enhance(model_path, noisy_dir, file_location, out_dir, noisy_json, sample_ra
             save_wavs(res_rt, noisy_signals, filenames, out_dir, sr=sample_rate)
 
 
-class my_rt_enhance():
-    def __init__(self):
-        self.model = get_model(model_path).to(device)
-        self.model.eval()
-        self.streamer = DemucsStreamer(self.model, num_frames=1)
+# def ut():
+#     args = parser.parse_args()
+#     logging.basicConfig(stream=sys.stderr, level=verbose)
+#     logger.debug(args)
 
-    def processBlock(self, audio):
-        assert(audio.__len__()[1] == 480)
-
-
-
-
-
-
-def ut():
-    args = parser.parse_args()
-    logging.basicConfig(stream=sys.stderr, level=verbose)
-    logger.debug(args)
-
-    # with file_location from args
-    enhance(model_path, noisy_dir, args.file_location, out_dir, noisy_json, sample_rate,
-            batch_size, device, num_workers, dns48, dns64, master64,
-            dry, streaming, verbose, local_out_dir=out_dir)
+#     # with file_location from args
+#     enhance(model_path, noisy_dir, args.file_location, out_dir, noisy_json, sample_rate,
+#             batch_size, device, num_workers, dns48, dns64, master64,
+#             dry, streaming, verbose, local_out_dir=out_dir)
 
 
 def ut_my():
     import numpy as np
     import matplotlib.pyplot as plt
+    
 
     FILE_WAV = "/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav/input_noise_car_talk.wav"
     MODEL_PATH = "/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/denoiser/best.th"
@@ -246,23 +198,17 @@ def ut_my():
 
     
     # loop processBlock for realtime stream mode
-    for idx in range(audio_frame_num):
-        # push tmp_in [1,480] data into EFX model
-        # EFX.pushNewInputFrame(audio[:,idx*FRAME_SIZE:(idx+1)*FRAME_SIZE]) 
+    for idx in tqdm(range(audio_frame_num)):
         output[idx*FRAME_SIZE:(idx+1)*FRAME_SIZE] = streamer.processBlock(audio[:,idx*FRAME_SIZE:(idx+1)*FRAME_SIZE])
-        # get tmp_out [1,480] data from EFX model
-        # output[idx*FRAME_SIZE:(idx+1)*FRAME_SIZE] = EFX.getNewOutputFrame()
 
-    
-    
     
     # save output
     sf.write("/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav/input_noise_car_talk_res_overlap256.wav",output,16000)
     
 
-    plt.figure(1)
-    plt.plot(output)
-    plt.show()
+    # plt.figure(1)
+    # plt.plot(output)
+    # plt.show()
 
 
     xxx = 1
