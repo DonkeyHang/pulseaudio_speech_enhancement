@@ -483,7 +483,6 @@ class DemucsStreamer_RT:
         self.demucs = demucs
         self.lstm_state = None
         self.conv_state = None
-        # self.dry = dry# 0
         self.resample_buf_size_256 = 256# 256
         self.frame_length = demucs.valid_length(1)# 597
         self.total_length = 661
@@ -495,7 +494,6 @@ class DemucsStreamer_RT:
         self.total_time = 0
         self.variance = 0
         self.pending = th.zeros(demucs.chin, 0, device=device)# [1,0]
-        self.counter = 0
 
         bias = demucs.decoder[0][2].bias# [384]
         weight = demucs.decoder[0][2].weight# [768,384,8]
@@ -506,14 +504,12 @@ class DemucsStreamer_RT:
         self.in_buf_1024 = AudioRingBuffer(1,1024)
         self.out_buf_1024 = AudioRingBuffer(1,1024)
         self.out_buf_1024.write( th.as_tensor(np.zeros((1,480)), dtype=th.float32) )
-        # self.out_buf_1024.write(th.as_tensor(np.zeros(661)))
         self.process_buf_661 = th.as_tensor( np.zeros((1,PROCESS_SIZE_661)), dtype=th.float32 )
-        # self.tmp_out_480 = th.as_tensor( np.zeros((1,480)), dtype=th.float32 )
         self.tmp_out_480 = np.zeros(480)
         
 
     def processBlock(self, new_frame_480):
-        self.counter+=1
+        # self.counter+=1
 
         # push 480 new data into in_buf_960
         if self.in_buf_1024.available_to_write():
@@ -524,7 +520,6 @@ class DemucsStreamer_RT:
         # process if buffer_size>661
         while(self.in_buf_1024.available_to_read() >= STEP_SIZE):
             #once process need 661 samples at least 
-            # self.process_buf_661 = self.in_buf_1024.read(PROCESS_SIZE_661)
             self.process_buf_661[:,:-STEP_SIZE] = self.process_buf_661[:,STEP_SIZE:].clone()
             self.process_buf_661[:,-STEP_SIZE:] = th.as_tensor(self.in_buf_1024.read(STEP_SIZE),dtype=th.float32)
 
@@ -533,7 +528,6 @@ class DemucsStreamer_RT:
             if self.demucs.normalize:
                 mono = frame.mean(0)
                 self.variance = (mono**2).mean()
-                # self.variance = variance / self.frames + (1 - 1 / self.frames) * self.variance
                 frame = frame / (self.demucs.floor + math.sqrt(self.variance))
             frame = th.cat([self.resample_in, frame], dim=-1)#[1,917]
             self.resample_in[:] = frame[:, self.stride_size - self.resample_buf_size_256:self.stride_size]#[1,256]
@@ -559,21 +553,16 @@ class DemucsStreamer_RT:
                 out *= math.sqrt(self.variance)
 
             # push output into out_buf_960
-
             if self.out_buf_1024.available_to_write()>=STEP_SIZE:
-                # self.out_buf_1024.write( (self.process_buf_661[:,0:STEP_SIZE]).detach().numpy() )
                 self.out_buf_1024.write( out.detach().numpy() )
             else:
                 print("out_buf_1024 push error")
-                print("COUNTER = ",self.counter)
                 
         # pop 480 new data
         if(self.out_buf_1024.available_to_read() >= FRAME_SIZE_480):
-            # self.tmp_out_480 = self.out_buf_1024.read(FRAME_SIZE_480)
             self.tmp_out_480 = self.out_buf_1024.read(FRAME_SIZE_480)[0]
         else:
             print("output buffer pop error")
-            print("COUNTER = ",self.counter)
 
         return self.tmp_out_480
 
