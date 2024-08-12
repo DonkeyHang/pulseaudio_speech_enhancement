@@ -33,13 +33,13 @@ logger = logging.getLogger(__name__)
 # noisy_dir = FILE_PATH
 # new option for direct file version we are testing
 
-file_location = None
+# file_location = None
 
 # out_dir = FILE_PATH + '/static/'
 
-noisy_json = None
+# noisy_json = None
 sample_rate = 16000
-batch_size = 1
+# batch_size = 1
 # device = 'cpu'
 # num_workers = 10
 # dns48 = False
@@ -73,9 +73,9 @@ batch_size = 1
 #     torchaudio.save(filename, wav.cpu(), sr)
 
 
-def get_dataset(noisy_dir):
-    files = find_audio_files(noisy_dir)
-    return Audioset(files, with_path=True, sample_rate=sample_rate)
+# def get_dataset(noisy_dir):
+#     files = find_audio_files(noisy_dir)
+#     return Audioset(files, with_path=True, sample_rate=sample_rate)
 
 
 def get_dataset_fast_api_version(file_location):
@@ -149,15 +149,15 @@ def ut_my():
     iterator = LogProgress(logger, loader, name="Generate enhanced files")
     for data in iterator:
         # Get all wav data
-        audio, filenames = data#[1,160000]
-    audio = audio.squeeze(0).to('cpu')
+        audio, filenames = data #audio:[1,160000] # audio samplerate is 48000
+    audio = audio.squeeze(0).to('cpu') 
     audio_frame_num = audio.shape[1] // FRAME_SIZE
 
     # output_buffer
     output = np.zeros(audio_frame_num*FRAME_SIZE)
 
     # model
-    model = get_model(MODEL_PATH).to(device)
+    model = get_model(MODEL_PATH).to('cpu')
     streamer = DemucsStreamer_RT(model)
 
     
