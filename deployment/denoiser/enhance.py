@@ -80,6 +80,7 @@ def ut_my():
     # plt.plot(output)
     # plt.show()
 
+    print("process done")
 
     xxx = 1
 

@@ -71,7 +71,7 @@ class Demucs(nn.Module):
         - floor (float): stability flooring when normalizing.
 
     """
-    @capture_init
+    # @capture_init
     def __init__(self,
                  chin=1,
                  chout=1,
@@ -276,11 +276,7 @@ class AudioRingBuffer:
 
 
 class DemucsStreamer_RT:
-    def __init__(self, demucs,
-                 dry=0,
-                 num_frames=1,
-                 resample_lookahead=64,
-                 resample_buffer=256):
+    def __init__(self, demucs):
         device = next(iter(demucs.parameters())).device
         self.demucs = demucs
         self.lstm_state = None
