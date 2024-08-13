@@ -34,18 +34,18 @@ class BLSTM(nn.Module):
         return x, hidden
 
 
-def rescale_conv(conv, reference):
-    std = conv.weight.std().detach()
-    scale = (std / reference)**0.5
-    conv.weight.data /= scale
-    if conv.bias is not None:
-        conv.bias.data /= scale
+# def rescale_conv(conv, reference):
+#     std = conv.weight.std().detach()
+#     scale = (std / reference)**0.5
+#     conv.weight.data /= scale
+#     if conv.bias is not None:
+#         conv.bias.data /= scale
 
 
-def rescale_module(module, reference):
-    for sub in module.modules():
-        if isinstance(sub, (nn.Conv1d, nn.ConvTranspose1d)):
-            rescale_conv(sub, reference)
+# def rescale_module(module, reference):
+#     for sub in module.modules():
+#         if isinstance(sub, (nn.Conv1d, nn.ConvTranspose1d)):
+#             rescale_conv(sub, reference)
 
 
 class Demucs(nn.Module):
@@ -71,7 +71,6 @@ class Demucs(nn.Module):
         - floor (float): stability flooring when normalizing.
 
     """
-    # @capture_init
     def __init__(self,
                  chin=1,
                  chout=1,
@@ -131,7 +130,19 @@ class Demucs(nn.Module):
 
         self.lstm = BLSTM(chin, bi=not causal)
         if rescale:
-            rescale_module(self, reference=rescale)
+            self._rescale_module(reference=rescale)
+
+    def _rescale_conv(self, conv, reference):
+        std = conv.weight.std().detach()
+        scale = (std / reference)**0.5
+        conv.weight.data /= scale
+        if conv.bias is not None:
+            conv.bias.data /= scale
+
+    def _rescale_module(self, reference):
+        for sub in self.modules():
+            if isinstance(sub, (nn.Conv1d, nn.ConvTranspose1d)):
+                self._rescale_conv(sub, reference)
 
     def valid_length(self, length):
         """
