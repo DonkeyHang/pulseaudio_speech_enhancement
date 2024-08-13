@@ -10,12 +10,13 @@ from torch.nn import functional as F
 import numpy as np
 
 from resample import downsample2, upsample2
-from utils import capture_init
+import inspect
 
 FRAME_SIZE_480 = 480
 PROCESS_SIZE_661 = 661
 STEP_SIZE = 256
 OUTPUT_FRAME_SIZE = 256
+MODEL_PATH = "/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/denoiser/best.th"
 
 
 class BLSTM(nn.Module):
@@ -191,6 +192,208 @@ class Demucs(nn.Module):
         return std * x
 
 
+class InferenceOnceImpl(nn.Module):
+    '''
+    this class means export onnx for inference once
+    used demucs model to inference once and combine all of another opration, 
+    such as upsample and downsample, fast_conv and so on
+    '''
+
+    def __init__(self):
+        super().__init__()
+        self.demucs = self._load_model()
+
+        self.lstm_state = None
+        self.conv_state = None
+        self.resample_buf_size_256 = 256# 256
+        self.frame_length = self.demucs.valid_length(1)# 597
+        self.total_length = 661
+        self.stride_size = self.demucs.total_stride# 256
+        self.resample_in = th.zeros(self.demucs.chin, self.resample_buf_size_256, device='cpu')# [1,256]
+        self.resample_out = th.zeros(self.demucs.chin, self.resample_buf_size_256, device='cpu')# [1,256]
+        self.process_buf_661 = th.as_tensor( np.zeros((1,PROCESS_SIZE_661)), dtype=th.float32 )
+
+        self.variance = 0
+        self.pending = th.zeros(self.demucs.chin, 0, device='cpu')# [1,0]
+
+        bias = self.demucs.decoder[0][2].bias# [384]
+        weight = self.demucs.decoder[0][2].weight# [768,384,8]
+        _, _, kernel = weight.shape# kernel:8
+        self._bias = bias.view(-1, 1).repeat(1, kernel).view(-1, 1)# [3072,1]
+        self._weight = weight.permute(1, 2, 0).contiguous()# [384,8,768]
+
+        self.output_tensor_256 = th.as_tensor( np.zeros((1,256)),dtype=th.float32 )
+
+
+    def forward(self, tensor_buffer_256):
+        self.output_tensor_256 = self._processOnce(tensor_buffer_256)
+        return self.output_tensor_256
+
+
+    def _processOnce(self, tensor_buffer_256):
+        # input:Tensor[1,256]
+
+        #once process need 661 samples at least 
+        self.process_buf_661[:,:-STEP_SIZE] = self.process_buf_661[:,STEP_SIZE:].clone()
+        self.process_buf_661[:,-STEP_SIZE:] = tensor_buffer_256  
+
+        # preprocess
+        frame = self.process_buf_661#.unsqueeze(0)#[1,661]
+        if self.demucs.normalize:
+            mono = frame.mean(0)
+            self.variance = (mono**2).mean()
+            frame = frame / (self.demucs.floor + math.sqrt(self.variance))
+        frame = th.cat([self.resample_in, frame], dim=-1)#[1,917]
+        self.resample_in[:] = frame[:, self.stride_size - self.resample_buf_size_256:self.stride_size]#[1,256]
+
+        if self.demucs.resample == 4:
+            frame = upsample2(upsample2(frame))#[1,3668]
+        elif self.demucs.resample == 2:
+            frame = upsample2(frame)
+        frame = frame[:, self.demucs.resample * self.resample_buf_size_256:]#[1,1024:]  # remove pre sampling buffer
+        frame = frame[:, :self.demucs.resample * self.frame_length]#[1,:2388]  # remove extra samples after window
+        
+        # note infer
+        out, extra = self._separate_frame(frame)#out:[1,1024] #extra:[1,1364]
+
+        # post process
+        padded_out = th.cat([self.resample_out, out, extra], 1)#[1,2644]
+        self.resample_out[:] = out[:, -self.resample_buf_size_256:]#self.resample_out:[1,256]
+        if self.demucs.resample == 4:
+            out = downsample2(downsample2(padded_out))#[1,661]
+        else:
+            print("downresample error")
+        out = out[:, self.resample_buf_size_256 // self.demucs.resample:]#[1,597]
+        out = out[:, :self.stride_size]#[1,256]
+
+        if self.demucs.normalize:
+            out *= math.sqrt(self.variance)
+
+        #output: Tensor[1,256]
+        return out.clone()
+
+    def _fast_conv(self, conv, x):
+        """
+        Faster convolution evaluation if either kernel size is 1
+        or length of sequence is 1.
+        """
+        batch, chin, length = x.shape
+        chout, chin, kernel = conv.weight.shape
+        assert batch == 1
+        if kernel == 1:
+            x = x.view(chin, length)
+            out = th.addmm(conv.bias.view(-1, 1),
+                        conv.weight.view(chout, chin), x)
+        elif length == kernel:
+            x = x.view(chin * kernel, 1)
+            out = th.addmm(conv.bias.view(-1, 1),
+                        conv.weight.view(chout, chin * kernel), x)
+        else:
+            out = conv(x)
+        return out.view(batch, chout, -1)
+
+    def _separate_frame(self, frame):
+        # demucs = self.demucs
+        skips = []
+        next_state = []
+        first = self.conv_state is None
+        stride = self.stride_size * self.demucs.resample
+        x = frame[None]
+        
+        #encoder
+        for idx, encode in enumerate(self.demucs.encoder):
+            stride //= self.demucs.stride
+            length = x.shape[2]
+            if idx == self.demucs.depth - 1:
+                # This is sligthly faster for the last conv
+                x = self._fast_conv(encode[0], x)
+                x = encode[1](x)
+                x = self._fast_conv(encode[2], x)
+                x = encode[3](x)
+            else:
+                if not first:
+                    prev = self.conv_state.pop(0)
+                    prev = prev[..., stride:]
+                    tgt = (length - self.demucs.kernel_size) // self.demucs.stride + 1
+                    missing = tgt - prev.shape[-1]
+                    offset = length - self.demucs.kernel_size - self.demucs.stride * (missing - 1)
+                    x = x[..., offset:]
+                x = encode[1](encode[0](x))
+                x = self._fast_conv(encode[2], x)
+                x = encode[3](x)
+                if not first:
+                    x = th.cat([prev, x], -1)
+                next_state.append(x)
+            skips.append(x)
+
+        x = x.permute(2, 0, 1)
+        x, self.lstm_state = self.demucs.lstm(x, self.lstm_state)
+        x = x.permute(1, 2, 0)
+        # In the following, x contains only correct samples, i.e. the one
+        # for which each time position is covered by two window of the upper layer.
+        # extra contains extra samples to the right, and is used only as a
+        # better padding for the online resampling.
+        extra = None
+
+        # decoder
+        for idx, decode in enumerate(self.demucs.decoder):
+            skip = skips.pop(-1)
+            x += skip[..., :x.shape[-1]]
+            x = self._fast_conv(decode[0], x)
+            x = decode[1](x)
+
+            if extra is not None:
+                skip = skip[..., x.shape[-1]:]
+                extra += skip[..., :extra.shape[-1]]
+                extra = decode[2](decode[1](decode[0](extra)))
+            x = decode[2](x)
+            next_state.append(x[..., -self.demucs.stride:] - decode[2].bias.view(-1, 1))
+            if extra is None:
+                extra = x[..., -self.demucs.stride:]
+            else:
+                extra[..., :self.demucs.stride] += next_state[-1]
+            x = x[..., :-self.demucs.stride]
+
+            if not first:
+                prev = self.conv_state.pop(0)
+                x[..., :self.demucs.stride] += prev
+            if idx != self.demucs.depth - 1:
+                x = decode[3](x)
+                extra = decode[3](extra)
+        self.conv_state = next_state
+
+        return x[0], extra[0]
+
+    def _deserialize_model(self, package, strict=False):
+        klass = package['class']
+        if strict:
+            model = klass(*package['args'], **package['kwargs'])
+        else:
+            sig = inspect.signature(klass)
+            kw = package['kwargs']
+            for key in list(kw):
+                if key not in sig.parameters:
+                    del kw[key]
+            model = klass(*package['args'], **kw)
+        model.load_state_dict(package['state'])
+        return model
+    
+    def _get_model(self, model_path):
+        if model_path:
+            pkg = th.load(model_path)
+            model = self._deserialize_model(pkg)
+        return model
+    
+    def _load_model(self,model_path=MODEL_PATH):
+        model = self._get_model(model_path).to('cpu')
+        return model
+
+
+
+
+
+
+
 class RingBuffer:
     def __init__(self, element_count, element_size):
         self.size = element_count
@@ -250,35 +453,15 @@ class AudioRingBuffer:
     def available_to_write(self):
         return min(buffer.available_to_write() for buffer in self.buffers)
 
-
 class DemucsStreamer_RT:
     def __init__(self, demucs):
         device = next(iter(demucs.parameters())).device
         self.demucs = demucs
-        self.lstm_state = None
-        self.conv_state = None
-        self.resample_buf_size_256 = 256# 256
-        self.frame_length = demucs.valid_length(1)# 597
-        self.total_length = 661
-        self.stride_size = demucs.total_stride# 256
-        self.resample_in = th.zeros(demucs.chin, self.resample_buf_size_256, device=device)# [1,256]
-        self.resample_out = th.zeros(demucs.chin, self.resample_buf_size_256, device=device)# [1,256]
-
-        self.frames = 0
-        self.total_time = 0
-        self.variance = 0
-        self.pending = th.zeros(demucs.chin, 0, device=device)# [1,0]
-
-        bias = demucs.decoder[0][2].bias# [384]
-        weight = demucs.decoder[0][2].weight# [768,384,8]
-        _, _, kernel = weight.shape# kernel:8
-        self._bias = bias.view(-1, 1).repeat(1, kernel).view(-1, 1)# [3072,1]
-        self._weight = weight.permute(1, 2, 0).contiguous()# [384,8,768]
+        self.impl = InferenceOnceImpl()
 
         self.in_buf_1024 = AudioRingBuffer(1,1024)
         self.out_buf_1024 = AudioRingBuffer(1,1024)
         self.out_buf_1024.write( th.as_tensor(np.zeros((1,480)), dtype=th.float32) )
-        self.process_buf_661 = th.as_tensor( np.zeros((1,PROCESS_SIZE_661)), dtype=th.float32 )
         self.tmp_out_480 = np.zeros(480)
         self.tmp_out_256 = np.zeros((1,256))
 
@@ -295,7 +478,7 @@ class DemucsStreamer_RT:
         # process if buffer_size>661
         while(self.in_buf_1024.available_to_read() >= STEP_SIZE):
             # model inference once
-            self.tmp_out_256 = self._processOnce()
+            self.tmp_out_256 = self.impl.forward(th.as_tensor(self.in_buf_1024.read(STEP_SIZE),dtype=th.float32))
 
             # push output into out_buf_960
             if self.out_buf_1024.available_to_write()>=STEP_SIZE:
@@ -311,139 +494,202 @@ class DemucsStreamer_RT:
 
         return self.tmp_out_480
 
-    def _processOnce(self):
-        #once process need 661 samples at least 
-        self.process_buf_661[:,:-STEP_SIZE] = self.process_buf_661[:,STEP_SIZE:].clone()
-        self.process_buf_661[:,-STEP_SIZE:] = th.as_tensor(self.in_buf_1024.read(STEP_SIZE),dtype=th.float32)
 
-        # preprocess
-        frame = self.process_buf_661#.unsqueeze(0)#[1,661]
-        if self.demucs.normalize:
-            mono = frame.mean(0)
-            self.variance = (mono**2).mean()
-            frame = frame / (self.demucs.floor + math.sqrt(self.variance))
-        frame = th.cat([self.resample_in, frame], dim=-1)#[1,917]
-        self.resample_in[:] = frame[:, self.stride_size - self.resample_buf_size_256:self.stride_size]#[1,256]
 
-        if self.demucs.resample == 4:
-            frame = upsample2(upsample2(frame))#[1,3668]
-        elif self.demucs.resample == 2:
-            frame = upsample2(frame)
-        frame = frame[:, self.demucs.resample * self.resample_buf_size_256:]#[1,1024:]  # remove pre sampling buffer
-        frame = frame[:, :self.demucs.resample * self.frame_length]#[1,:2388]  # remove extra samples after window
+
+# class DemucsStreamer_RT:
+#     def __init__(self, demucs):
+#         device = next(iter(demucs.parameters())).device
+#         self.demucs = demucs
+#         self.lstm_state = None
+#         self.conv_state = None
+#         self.resample_buf_size_256 = 256# 256
+#         self.frame_length = demucs.valid_length(1)# 597
+#         self.total_length = 661
+#         self.stride_size = demucs.total_stride# 256
+#         self.resample_in = th.zeros(demucs.chin, self.resample_buf_size_256, device=device)# [1,256]
+#         self.resample_out = th.zeros(demucs.chin, self.resample_buf_size_256, device=device)# [1,256]
+
+#         self.frames = 0
+#         self.total_time = 0
+#         self.variance = 0
+#         self.pending = th.zeros(demucs.chin, 0, device=device)# [1,0]
+
+#         bias = demucs.decoder[0][2].bias# [384]
+#         weight = demucs.decoder[0][2].weight# [768,384,8]
+#         _, _, kernel = weight.shape# kernel:8
+#         self._bias = bias.view(-1, 1).repeat(1, kernel).view(-1, 1)# [3072,1]
+#         self._weight = weight.permute(1, 2, 0).contiguous()# [384,8,768]
+
+#         self.in_buf_1024 = AudioRingBuffer(1,1024)
+#         self.out_buf_1024 = AudioRingBuffer(1,1024)
+#         self.out_buf_1024.write( th.as_tensor(np.zeros((1,480)), dtype=th.float32) )
+#         self.process_buf_661 = th.as_tensor( np.zeros((1,PROCESS_SIZE_661)), dtype=th.float32 )
+#         self.tmp_out_480 = np.zeros(480)
+#         self.tmp_out_256 = np.zeros((1,256))
+
+
+#     def processBlock(self, new_frame_480):
+#         # self.counter+=1
+
+#         # push 480 new data into in_buf_960
+#         if self.in_buf_1024.available_to_write():
+#             self.in_buf_1024.write(new_frame_480)
+#         else:
+#             print("in_buf_1024 push error")
+
+#         # process if buffer_size>661
+#         while(self.in_buf_1024.available_to_read() >= STEP_SIZE):
+#             # model inference once
+#             self.tmp_out_256 = self._processOnce()
+
+#             # push output into out_buf_960
+#             if self.out_buf_1024.available_to_write()>=STEP_SIZE:
+#                 self.out_buf_1024.write( self.tmp_out_256.detach().numpy() )
+#             else:
+#                 print("out_buf_1024 push error")
+                
+#         # pop 480 new data
+#         if(self.out_buf_1024.available_to_read() >= FRAME_SIZE_480):
+#             self.tmp_out_480 = self.out_buf_1024.read(FRAME_SIZE_480)[0]
+#         else:
+#             print("output buffer pop error")
+
+#         return self.tmp_out_480
+
+
+#     def _processOnce(self):
+#         #once process need 661 samples at least 
+#         self.process_buf_661[:,:-STEP_SIZE] = self.process_buf_661[:,STEP_SIZE:].clone()
+#         self.process_buf_661[:,-STEP_SIZE:] = th.as_tensor(self.in_buf_1024.read(STEP_SIZE),dtype=th.float32)
+
+#         # preprocess
+#         frame = self.process_buf_661#.unsqueeze(0)#[1,661]
+#         if self.demucs.normalize:
+#             mono = frame.mean(0)
+#             self.variance = (mono**2).mean()
+#             frame = frame / (self.demucs.floor + math.sqrt(self.variance))
+#         frame = th.cat([self.resample_in, frame], dim=-1)#[1,917]
+#         self.resample_in[:] = frame[:, self.stride_size - self.resample_buf_size_256:self.stride_size]#[1,256]
+
+#         if self.demucs.resample == 4:
+#             frame = upsample2(upsample2(frame))#[1,3668]
+#         elif self.demucs.resample == 2:
+#             frame = upsample2(frame)
+#         frame = frame[:, self.demucs.resample * self.resample_buf_size_256:]#[1,1024:]  # remove pre sampling buffer
+#         frame = frame[:, :self.demucs.resample * self.frame_length]#[1,:2388]  # remove extra samples after window
         
-        # note infer
-        out, extra = self._separate_frame(frame)#out:[1,1024] #extra:[1,1364]
+#         # note infer
+#         out, extra = self._separate_frame(frame)#out:[1,1024] #extra:[1,1364]
 
-        # post process
-        padded_out = th.cat([self.resample_out, out, extra], 1)#[1,2644]
-        self.resample_out[:] = out[:, -self.resample_buf_size_256:]#self.resample_out:[1,256]
-        if self.demucs.resample == 4:
-            out = downsample2(downsample2(padded_out))#[1,661]
-        else:
-            print("downresample error")
-        out = out[:, self.resample_buf_size_256 // self.demucs.resample:]#[1,597]
-        out = out[:, :self.stride_size]#[1,256]
+#         # post process
+#         padded_out = th.cat([self.resample_out, out, extra], 1)#[1,2644]
+#         self.resample_out[:] = out[:, -self.resample_buf_size_256:]#self.resample_out:[1,256]
+#         if self.demucs.resample == 4:
+#             out = downsample2(downsample2(padded_out))#[1,661]
+#         else:
+#             print("downresample error")
+#         out = out[:, self.resample_buf_size_256 // self.demucs.resample:]#[1,597]
+#         out = out[:, :self.stride_size]#[1,256]
 
-        if self.demucs.normalize:
-            out *= math.sqrt(self.variance)
+#         if self.demucs.normalize:
+#             out *= math.sqrt(self.variance)
 
-        return out.clone()#[1,256]
-
-    def fast_conv(self, conv, x):
-        """
-        Faster convolution evaluation if either kernel size is 1
-        or length of sequence is 1.
-        """
-        batch, chin, length = x.shape
-        chout, chin, kernel = conv.weight.shape
-        assert batch == 1
-        if kernel == 1:
-            x = x.view(chin, length)
-            out = th.addmm(conv.bias.view(-1, 1),
-                        conv.weight.view(chout, chin), x)
-        elif length == kernel:
-            x = x.view(chin * kernel, 1)
-            out = th.addmm(conv.bias.view(-1, 1),
-                        conv.weight.view(chout, chin * kernel), x)
-        else:
-            out = conv(x)
-        return out.view(batch, chout, -1)
+#         return out.clone()#[1,256]
 
 
-    def _separate_frame(self, frame):
-        # demucs = self.demucs
-        skips = []
-        next_state = []
-        first = self.conv_state is None
-        stride = self.stride_size * self.demucs.resample
-        x = frame[None]
+#     def _fast_conv(self, conv, x):
+#         """
+#         Faster convolution evaluation if either kernel size is 1
+#         or length of sequence is 1.
+#         """
+#         batch, chin, length = x.shape
+#         chout, chin, kernel = conv.weight.shape
+#         assert batch == 1
+#         if kernel == 1:
+#             x = x.view(chin, length)
+#             out = th.addmm(conv.bias.view(-1, 1),
+#                         conv.weight.view(chout, chin), x)
+#         elif length == kernel:
+#             x = x.view(chin * kernel, 1)
+#             out = th.addmm(conv.bias.view(-1, 1),
+#                         conv.weight.view(chout, chin * kernel), x)
+#         else:
+#             out = conv(x)
+#         return out.view(batch, chout, -1)
+
+
+#     def _separate_frame(self, frame):
+#         # demucs = self.demucs
+#         skips = []
+#         next_state = []
+#         first = self.conv_state is None
+#         stride = self.stride_size * self.demucs.resample
+#         x = frame[None]
         
-        #encoder
-        for idx, encode in enumerate(self.demucs.encoder):
-            stride //= self.demucs.stride
-            length = x.shape[2]
-            if idx == self.demucs.depth - 1:
-                # This is sligthly faster for the last conv
-                x = self.fast_conv(encode[0], x)
-                x = encode[1](x)
-                x = self.fast_conv(encode[2], x)
-                x = encode[3](x)
-            else:
-                if not first:
-                    prev = self.conv_state.pop(0)
-                    prev = prev[..., stride:]
-                    tgt = (length - self.demucs.kernel_size) // self.demucs.stride + 1
-                    missing = tgt - prev.shape[-1]
-                    offset = length - self.demucs.kernel_size - self.demucs.stride * (missing - 1)
-                    x = x[..., offset:]
-                x = encode[1](encode[0](x))
-                x = self.fast_conv(encode[2], x)
-                x = encode[3](x)
-                if not first:
-                    x = th.cat([prev, x], -1)
-                next_state.append(x)
-            skips.append(x)
+#         #encoder
+#         for idx, encode in enumerate(self.demucs.encoder):
+#             stride //= self.demucs.stride
+#             length = x.shape[2]
+#             if idx == self.demucs.depth - 1:
+#                 # This is sligthly faster for the last conv
+#                 x = self._fast_conv(encode[0], x)
+#                 x = encode[1](x)
+#                 x = self._fast_conv(encode[2], x)
+#                 x = encode[3](x)
+#             else:
+#                 if not first:
+#                     prev = self.conv_state.pop(0)
+#                     prev = prev[..., stride:]
+#                     tgt = (length - self.demucs.kernel_size) // self.demucs.stride + 1
+#                     missing = tgt - prev.shape[-1]
+#                     offset = length - self.demucs.kernel_size - self.demucs.stride * (missing - 1)
+#                     x = x[..., offset:]
+#                 x = encode[1](encode[0](x))
+#                 x = self._fast_conv(encode[2], x)
+#                 x = encode[3](x)
+#                 if not first:
+#                     x = th.cat([prev, x], -1)
+#                 next_state.append(x)
+#             skips.append(x)
 
-        x = x.permute(2, 0, 1)
-        x, self.lstm_state = self.demucs.lstm(x, self.lstm_state)
-        x = x.permute(1, 2, 0)
-        # In the following, x contains only correct samples, i.e. the one
-        # for which each time position is covered by two window of the upper layer.
-        # extra contains extra samples to the right, and is used only as a
-        # better padding for the online resampling.
-        extra = None
+#         x = x.permute(2, 0, 1)
+#         x, self.lstm_state = self.demucs.lstm(x, self.lstm_state)
+#         x = x.permute(1, 2, 0)
+#         # In the following, x contains only correct samples, i.e. the one
+#         # for which each time position is covered by two window of the upper layer.
+#         # extra contains extra samples to the right, and is used only as a
+#         # better padding for the online resampling.
+#         extra = None
 
-        # decoder
-        for idx, decode in enumerate(self.demucs.decoder):
-            skip = skips.pop(-1)
-            x += skip[..., :x.shape[-1]]
-            x = self.fast_conv(decode[0], x)
-            x = decode[1](x)
+#         # decoder
+#         for idx, decode in enumerate(self.demucs.decoder):
+#             skip = skips.pop(-1)
+#             x += skip[..., :x.shape[-1]]
+#             x = self._fast_conv(decode[0], x)
+#             x = decode[1](x)
 
-            if extra is not None:
-                skip = skip[..., x.shape[-1]:]
-                extra += skip[..., :extra.shape[-1]]
-                extra = decode[2](decode[1](decode[0](extra)))
-            x = decode[2](x)
-            next_state.append(x[..., -self.demucs.stride:] - decode[2].bias.view(-1, 1))
-            if extra is None:
-                extra = x[..., -self.demucs.stride:]
-            else:
-                extra[..., :self.demucs.stride] += next_state[-1]
-            x = x[..., :-self.demucs.stride]
+#             if extra is not None:
+#                 skip = skip[..., x.shape[-1]:]
+#                 extra += skip[..., :extra.shape[-1]]
+#                 extra = decode[2](decode[1](decode[0](extra)))
+#             x = decode[2](x)
+#             next_state.append(x[..., -self.demucs.stride:] - decode[2].bias.view(-1, 1))
+#             if extra is None:
+#                 extra = x[..., -self.demucs.stride:]
+#             else:
+#                 extra[..., :self.demucs.stride] += next_state[-1]
+#             x = x[..., :-self.demucs.stride]
 
-            if not first:
-                prev = self.conv_state.pop(0)
-                x[..., :self.demucs.stride] += prev
-            if idx != self.demucs.depth - 1:
-                x = decode[3](x)
-                extra = decode[3](extra)
-        self.conv_state = next_state
+#             if not first:
+#                 prev = self.conv_state.pop(0)
+#                 x[..., :self.demucs.stride] += prev
+#             if idx != self.demucs.depth - 1:
+#                 x = decode[3](x)
+#                 extra = decode[3](extra)
+#         self.conv_state = next_state
 
-        return x[0], extra[0]
-    
-
+#         return x[0], extra[0]
 
 # def test():
 #     import argparse
