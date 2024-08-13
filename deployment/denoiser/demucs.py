@@ -9,7 +9,7 @@ from torch import nn
 from torch.nn import functional as F
 import numpy as np
 
-from resample import downsample2, upsample2
+# from resample import downsample2, upsample2
 import inspect
 
 FRAME_SIZE_480 = 480
@@ -153,6 +153,68 @@ class Demucs(nn.Module):
     def total_stride(self):
         return self.stride ** self.depth // self.resample
 
+    # ------------------ resample part --------------------
+    def sinc(self, t):
+        """sinc.
+
+        :param t: the input tensor
+        """
+        return th.where(t == 0, th.tensor(1., device=t.device, dtype=t.dtype), th.sin(t) / t)
+
+    def kernel_upsample2(self, zeros=56):
+        """kernel_upsample2.
+
+        """
+        win = th.hann_window(4 * zeros + 1, periodic=False)
+        winodd = win[1::2]
+        t = th.linspace(-zeros + 0.5, zeros - 0.5, 2 * zeros)
+        t *= math.pi
+        kernel = (self.sinc(t) * winodd).view(1, 1, -1)
+        return kernel
+
+    def upsample2(self, x, zeros=56):
+        """
+        Upsampling the input by 2 using sinc interpolation.
+        Smith, Julius, and Phil Gossett. "A flexible sampling-rate conversion method."
+        ICASSP'84. IEEE International Conference on Acoustics, Speech, and Signal Processing.
+        Vol. 9. IEEE, 1984.
+        """
+        *other, time = x.shape
+        kernel = self.kernel_upsample2(zeros).to(x)
+        out = F.conv1d(x.view(-1, 1, time), kernel, padding=zeros)[..., 1:].view(*other, time)
+        y = th.stack([x, out], dim=-1)
+        return y.view(*other, -1)
+
+    def kernel_downsample2(self, zeros=56):
+        """kernel_downsample2.
+
+        """
+        win = th.hann_window(4 * zeros + 1, periodic=False)
+        winodd = win[1::2]
+        t = th.linspace(-zeros + 0.5, zeros - 0.5, 2 * zeros)
+        t.mul_(math.pi)
+        kernel = (self.sinc(t) * winodd).view(1, 1, -1)
+        return kernel
+
+    def downsample2(self, x, zeros=56):
+        """
+        Downsampling the input by 2 using sinc interpolation.
+        Smith, Julius, and Phil Gossett. "A flexible sampling-rate conversion method."
+        ICASSP'84. IEEE International Conference on Acoustics, Speech, and Signal Processing.
+        Vol. 9. IEEE, 1984.
+        """
+        if x.shape[-1] % 2 != 0:
+            x = F.pad(x, (0, 1))
+        xeven = x[..., ::2]
+        xodd = x[..., 1::2]
+        *other, time = xodd.shape
+        kernel = self.kernel_downsample2(zeros).to(x)
+        out = xeven + F.conv1d(xodd.view(-1, 1, time), kernel, padding=zeros)[..., :-1].view(
+            *other, time)
+        return out.view(*other, -1).mul(0.5)
+
+
+
     def forward(self, mix):
         if mix.dim() == 2:
             mix = mix.unsqueeze(1)
@@ -167,10 +229,10 @@ class Demucs(nn.Module):
         x = mix
         x = F.pad(x, (0, self.valid_length(length) - length))
         if self.resample == 2:
-            x = upsample2(x)
+            x = self.upsample2(x)
         elif self.resample == 4:
-            x = upsample2(x)
-            x = upsample2(x)
+            x = self.upsample2(x)
+            x = self.upsample2(x)
         skips = []
         for encode in self.encoder:
             x = encode(x)
@@ -183,10 +245,10 @@ class Demucs(nn.Module):
             x = x + skip[..., :x.shape[-1]]
             x = decode(x)
         if self.resample == 2:
-            x = downsample2(x)
+            x = self.downsample2(x)
         elif self.resample == 4:
-            x = downsample2(x)
-            x = downsample2(x)
+            x = self.downsample2(x)
+            x = self.downsample2(x)
 
         x = x[..., :length]
         return std * x
@@ -230,6 +292,8 @@ class InferenceOnceImpl(nn.Module):
         return self.output_tensor_256
 
 
+    # ------------------ model infer part ----------------
+    # push new 256 samples into ringbuffer and process once
     def _processOnce(self, tensor_buffer_256):
         # input:Tensor[1,256]
 
@@ -247,9 +311,9 @@ class InferenceOnceImpl(nn.Module):
         self.resample_in[:] = frame[:, self.stride_size - self.resample_buf_size_256:self.stride_size]#[1,256]
 
         if self.demucs.resample == 4:
-            frame = upsample2(upsample2(frame))#[1,3668]
+            frame = self._upsample2(self._upsample2(frame))#[1,3668]
         elif self.demucs.resample == 2:
-            frame = upsample2(frame)
+            frame = self._upsample2(frame)
         frame = frame[:, self.demucs.resample * self.resample_buf_size_256:]#[1,1024:]  # remove pre sampling buffer
         frame = frame[:, :self.demucs.resample * self.frame_length]#[1,:2388]  # remove extra samples after window
         
@@ -260,7 +324,7 @@ class InferenceOnceImpl(nn.Module):
         padded_out = th.cat([self.resample_out, out, extra], 1)#[1,2644]
         self.resample_out[:] = out[:, -self.resample_buf_size_256:]#self.resample_out:[1,256]
         if self.demucs.resample == 4:
-            out = downsample2(downsample2(padded_out))#[1,661]
+            out = self._downsample2(self._downsample2(padded_out))#[1,661]
         else:
             print("downresample error")
         out = out[:, self.resample_buf_size_256 // self.demucs.resample:]#[1,597]
@@ -292,6 +356,7 @@ class InferenceOnceImpl(nn.Module):
             out = conv(x)
         return out.view(batch, chout, -1)
 
+    # infer once for demucs model 
     def _separate_frame(self, frame):
         # demucs = self.demucs
         skips = []
@@ -364,6 +429,69 @@ class InferenceOnceImpl(nn.Module):
 
         return x[0], extra[0]
 
+
+    # ------------------ resample part --------------------
+    def _sinc(self, t):
+        """sinc.
+
+        :param t: the input tensor
+        """
+        return th.where(t == 0, th.tensor(1., device=t.device, dtype=t.dtype), th.sin(t) / t)
+
+    def _kernel_upsample2(self, zeros=56):
+        """kernel_upsample2.
+
+        """
+        win = th.hann_window(4 * zeros + 1, periodic=False)
+        winodd = win[1::2]
+        t = th.linspace(-zeros + 0.5, zeros - 0.5, 2 * zeros)
+        t *= math.pi
+        kernel = (self._sinc(t) * winodd).view(1, 1, -1)
+        return kernel
+
+    def _upsample2(self, x, zeros=56):
+        """
+        Upsampling the input by 2 using sinc interpolation.
+        Smith, Julius, and Phil Gossett. "A flexible sampling-rate conversion method."
+        ICASSP'84. IEEE International Conference on Acoustics, Speech, and Signal Processing.
+        Vol. 9. IEEE, 1984.
+        """
+        *other, time = x.shape
+        kernel = self._kernel_upsample2(zeros).to(x)
+        out = F.conv1d(x.view(-1, 1, time), kernel, padding=zeros)[..., 1:].view(*other, time)
+        y = th.stack([x, out], dim=-1)
+        return y.view(*other, -1)
+
+    def _kernel_downsample2(self, zeros=56):
+        """kernel_downsample2.
+
+        """
+        win = th.hann_window(4 * zeros + 1, periodic=False)
+        winodd = win[1::2]
+        t = th.linspace(-zeros + 0.5, zeros - 0.5, 2 * zeros)
+        t.mul_(math.pi)
+        kernel = (self._sinc(t) * winodd).view(1, 1, -1)
+        return kernel
+
+    def _downsample2(self, x, zeros=56):
+        """
+        Downsampling the input by 2 using sinc interpolation.
+        Smith, Julius, and Phil Gossett. "A flexible sampling-rate conversion method."
+        ICASSP'84. IEEE International Conference on Acoustics, Speech, and Signal Processing.
+        Vol. 9. IEEE, 1984.
+        """
+        if x.shape[-1] % 2 != 0:
+            x = F.pad(x, (0, 1))
+        xeven = x[..., ::2]
+        xodd = x[..., 1::2]
+        *other, time = xodd.shape
+        kernel = self._kernel_downsample2(zeros).to(x)
+        out = xeven + F.conv1d(xodd.view(-1, 1, time), kernel, padding=zeros)[..., :-1].view(
+            *other, time)
+        return out.view(*other, -1).mul(0.5)
+
+
+    # --------------- load model and coefs part -----------
     def _deserialize_model(self, package, strict=False):
         klass = package['class']
         if strict:
@@ -452,6 +580,7 @@ class AudioRingBuffer:
 
     def available_to_write(self):
         return min(buffer.available_to_write() for buffer in self.buffers)
+
 
 class DemucsStreamer_RT:
     def __init__(self, demucs):
