@@ -34,20 +34,6 @@ class BLSTM(nn.Module):
         return x, hidden
 
 
-# def rescale_conv(conv, reference):
-#     std = conv.weight.std().detach()
-#     scale = (std / reference)**0.5
-#     conv.weight.data /= scale
-#     if conv.bias is not None:
-#         conv.bias.data /= scale
-
-
-# def rescale_module(module, reference):
-#     for sub in module.modules():
-#         if isinstance(sub, (nn.Conv1d, nn.ConvTranspose1d)):
-#             rescale_conv(sub, reference)
-
-
 class Demucs(nn.Module):
     """
     Demucs speech enhancement model.
@@ -205,27 +191,6 @@ class Demucs(nn.Module):
         return std * x
 
 
-def fast_conv(conv, x):
-    """
-    Faster convolution evaluation if either kernel size is 1
-    or length of sequence is 1.
-    """
-    batch, chin, length = x.shape
-    chout, chin, kernel = conv.weight.shape
-    assert batch == 1
-    if kernel == 1:
-        x = x.view(chin, length)
-        out = th.addmm(conv.bias.view(-1, 1),
-                       conv.weight.view(chout, chin), x)
-    elif length == kernel:
-        x = x.view(chin * kernel, 1)
-        out = th.addmm(conv.bias.view(-1, 1),
-                       conv.weight.view(chout, chin * kernel), x)
-    else:
-        out = conv(x)
-    return out.view(batch, chout, -1)
-
-
 class RingBuffer:
     def __init__(self, element_count, element_size):
         self.size = element_count
@@ -315,6 +280,7 @@ class DemucsStreamer_RT:
         self.out_buf_1024.write( th.as_tensor(np.zeros((1,480)), dtype=th.float32) )
         self.process_buf_661 = th.as_tensor( np.zeros((1,PROCESS_SIZE_661)), dtype=th.float32 )
         self.tmp_out_480 = np.zeros(480)
+        self.tmp_out_256 = np.zeros((1,256))
 
 
     def processBlock(self, new_frame_480):
@@ -328,45 +294,12 @@ class DemucsStreamer_RT:
 
         # process if buffer_size>661
         while(self.in_buf_1024.available_to_read() >= STEP_SIZE):
-            #once process need 661 samples at least 
-            self.process_buf_661[:,:-STEP_SIZE] = self.process_buf_661[:,STEP_SIZE:].clone()
-            self.process_buf_661[:,-STEP_SIZE:] = th.as_tensor(self.in_buf_1024.read(STEP_SIZE),dtype=th.float32)
-
-            # preprocess
-            frame = self.process_buf_661#.unsqueeze(0)#[1,661]
-            if self.demucs.normalize:
-                mono = frame.mean(0)
-                self.variance = (mono**2).mean()
-                frame = frame / (self.demucs.floor + math.sqrt(self.variance))
-            frame = th.cat([self.resample_in, frame], dim=-1)#[1,917]
-            self.resample_in[:] = frame[:, self.stride_size - self.resample_buf_size_256:self.stride_size]#[1,256]
-
-            if self.demucs.resample == 4:
-                frame = upsample2(upsample2(frame))#[1,3668]
-            elif self.demucs.resample == 2:
-                frame = upsample2(frame)
-            frame = frame[:, self.demucs.resample * self.resample_buf_size_256:]#[1,1024:]  # remove pre sampling buffer
-            frame = frame[:, :self.demucs.resample * self.frame_length]#[1,:2388]  # remove extra samples after window
-            
-            # note infer
-            out, extra = self._separate_frame(frame)#out:[1,1024] #extra:[1,1364]
-
-            # post process
-            padded_out = th.cat([self.resample_out, out, extra], 1)#[1,2644]
-            self.resample_out[:] = out[:, -self.resample_buf_size_256:]#self.resample_out:[1,256]
-            if self.demucs.resample == 4:
-                out = downsample2(downsample2(padded_out))#[1,661]
-            else:
-                print("downresample error")
-            out = out[:, self.resample_buf_size_256 // self.demucs.resample:]#[1,597]
-            out = out[:, :self.stride_size]#[1,256]
-
-            if self.demucs.normalize:
-                out *= math.sqrt(self.variance)
+            # model inference once
+            self.tmp_out_256 = self._processOnce()
 
             # push output into out_buf_960
             if self.out_buf_1024.available_to_write()>=STEP_SIZE:
-                self.out_buf_1024.write( out.detach().numpy() )
+                self.out_buf_1024.write( self.tmp_out_256.detach().numpy() )
             else:
                 print("out_buf_1024 push error")
                 
@@ -378,6 +311,64 @@ class DemucsStreamer_RT:
 
         return self.tmp_out_480
 
+    def _processOnce(self):
+        #once process need 661 samples at least 
+        self.process_buf_661[:,:-STEP_SIZE] = self.process_buf_661[:,STEP_SIZE:].clone()
+        self.process_buf_661[:,-STEP_SIZE:] = th.as_tensor(self.in_buf_1024.read(STEP_SIZE),dtype=th.float32)
+
+        # preprocess
+        frame = self.process_buf_661#.unsqueeze(0)#[1,661]
+        if self.demucs.normalize:
+            mono = frame.mean(0)
+            self.variance = (mono**2).mean()
+            frame = frame / (self.demucs.floor + math.sqrt(self.variance))
+        frame = th.cat([self.resample_in, frame], dim=-1)#[1,917]
+        self.resample_in[:] = frame[:, self.stride_size - self.resample_buf_size_256:self.stride_size]#[1,256]
+
+        if self.demucs.resample == 4:
+            frame = upsample2(upsample2(frame))#[1,3668]
+        elif self.demucs.resample == 2:
+            frame = upsample2(frame)
+        frame = frame[:, self.demucs.resample * self.resample_buf_size_256:]#[1,1024:]  # remove pre sampling buffer
+        frame = frame[:, :self.demucs.resample * self.frame_length]#[1,:2388]  # remove extra samples after window
+        
+        # note infer
+        out, extra = self._separate_frame(frame)#out:[1,1024] #extra:[1,1364]
+
+        # post process
+        padded_out = th.cat([self.resample_out, out, extra], 1)#[1,2644]
+        self.resample_out[:] = out[:, -self.resample_buf_size_256:]#self.resample_out:[1,256]
+        if self.demucs.resample == 4:
+            out = downsample2(downsample2(padded_out))#[1,661]
+        else:
+            print("downresample error")
+        out = out[:, self.resample_buf_size_256 // self.demucs.resample:]#[1,597]
+        out = out[:, :self.stride_size]#[1,256]
+
+        if self.demucs.normalize:
+            out *= math.sqrt(self.variance)
+
+        return out.clone()#[1,256]
+
+    def fast_conv(self, conv, x):
+        """
+        Faster convolution evaluation if either kernel size is 1
+        or length of sequence is 1.
+        """
+        batch, chin, length = x.shape
+        chout, chin, kernel = conv.weight.shape
+        assert batch == 1
+        if kernel == 1:
+            x = x.view(chin, length)
+            out = th.addmm(conv.bias.view(-1, 1),
+                        conv.weight.view(chout, chin), x)
+        elif length == kernel:
+            x = x.view(chin * kernel, 1)
+            out = th.addmm(conv.bias.view(-1, 1),
+                        conv.weight.view(chout, chin * kernel), x)
+        else:
+            out = conv(x)
+        return out.view(batch, chout, -1)
 
 
     def _separate_frame(self, frame):
@@ -387,14 +378,16 @@ class DemucsStreamer_RT:
         first = self.conv_state is None
         stride = self.stride_size * self.demucs.resample
         x = frame[None]
+        
+        #encoder
         for idx, encode in enumerate(self.demucs.encoder):
             stride //= self.demucs.stride
             length = x.shape[2]
             if idx == self.demucs.depth - 1:
                 # This is sligthly faster for the last conv
-                x = fast_conv(encode[0], x)
+                x = self.fast_conv(encode[0], x)
                 x = encode[1](x)
-                x = fast_conv(encode[2], x)
+                x = self.fast_conv(encode[2], x)
                 x = encode[3](x)
             else:
                 if not first:
@@ -405,7 +398,7 @@ class DemucsStreamer_RT:
                     offset = length - self.demucs.kernel_size - self.demucs.stride * (missing - 1)
                     x = x[..., offset:]
                 x = encode[1](encode[0](x))
-                x = fast_conv(encode[2], x)
+                x = self.fast_conv(encode[2], x)
                 x = encode[3](x)
                 if not first:
                     x = th.cat([prev, x], -1)
@@ -420,10 +413,12 @@ class DemucsStreamer_RT:
         # extra contains extra samples to the right, and is used only as a
         # better padding for the online resampling.
         extra = None
+
+        # decoder
         for idx, decode in enumerate(self.demucs.decoder):
             skip = skips.pop(-1)
             x += skip[..., :x.shape[-1]]
-            x = fast_conv(decode[0], x)
+            x = self.fast_conv(decode[0], x)
             x = decode[1](x)
 
             if extra is not None:
@@ -445,6 +440,7 @@ class DemucsStreamer_RT:
                 x = decode[3](x)
                 extra = decode[3](extra)
         self.conv_state = next_state
+
         return x[0], extra[0]
     
 
