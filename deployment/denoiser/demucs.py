@@ -284,12 +284,18 @@ class InferenceOnceImpl(nn.Module):
         self._bias = bias.view(-1, 1).repeat(1, kernel).view(-1, 1)# [3072,1]
         self._weight = weight.permute(1, 2, 0).contiguous()# [384,8,768]
 
+        self.frame_661 = th.as_tensor( np.zeros((1,661)), dtype=th.float32 )
+        self.frame_917 = th.as_tensor( np.zeros((1,917)), dtype=th.float32 )
+        self.frame_3668 = th.as_tensor( np.zeros((1,3668)), dtype=th.float32 )
+        self.frame_2388 = th.as_tensor( np.zeros((1,2388)), dtype=th.float32 )
+        self.out_1024 = th.as_tensor( np.zeros((1,1024)), dtype=th.float32 )
+        self.extra_1364 = th.as_tensor( np.zeros((1,1364)), dtype=th.float32 )
+        self.paddedout_2644 = th.as_tensor( np.zeros((1,2644)), dtype=th.float32 )
         self.output_tensor_256 = th.as_tensor( np.zeros((1,256)),dtype=th.float32 )
 
 
     def forward(self, tensor_buffer_256):
-        self.output_tensor_256 = self._processOnce(tensor_buffer_256)
-        return self.output_tensor_256
+        return self._processOnce(tensor_buffer_256)
 
 
     # ------------------ model infer part ----------------
@@ -298,43 +304,41 @@ class InferenceOnceImpl(nn.Module):
         # input:Tensor[1,256]
 
         #once process need 661 samples at least 
-        self.process_buf_661[:,:-STEP_SIZE] = self.process_buf_661[:,STEP_SIZE:].clone()
+        self.process_buf_661 = th.roll(self.process_buf_661, -STEP_SIZE, dims=-1)
         self.process_buf_661[:,-STEP_SIZE:] = tensor_buffer_256  
 
         # preprocess
-        frame = self.process_buf_661#.unsqueeze(0)#[1,661]
+        self.frame_661 = self.process_buf_661.clone()#.unsqueeze(0)#[1,661]
         if self.demucs.normalize:
-            mono = frame.mean(0)
+            mono = self.frame_661.mean(0)
             self.variance = (mono**2).mean()
-            frame = frame / (self.demucs.floor + math.sqrt(self.variance))
-        frame = th.cat([self.resample_in, frame], dim=-1)#[1,917]
-        self.resample_in[:] = frame[:, self.stride_size - self.resample_buf_size_256:self.stride_size]#[1,256]
+            self.frame_661 = self.frame_661 / (self.demucs.floor + math.sqrt(self.variance))
+        self.frame_917 = th.cat([self.resample_in, self.frame_661], dim=-1)#[1,917]
+        self.resample_in = self.frame_917[:, self.stride_size - self.resample_buf_size_256:self.stride_size]#[1,256]
 
         if self.demucs.resample == 4:
-            frame = self._upsample2(self._upsample2(frame))#[1,3668]
-        elif self.demucs.resample == 2:
-            frame = self._upsample2(frame)
-        frame = frame[:, self.demucs.resample * self.resample_buf_size_256:]#[1,1024:]  # remove pre sampling buffer
-        frame = frame[:, :self.demucs.resample * self.frame_length]#[1,:2388]  # remove extra samples after window
+            self.frame_3668 = self._upsample2(self._upsample2(self.frame_917))#[1,3668]
+        else:
+            print("upsample error")
+        self.frame_2388 = self.frame_3668[:, (self.demucs.resample*self.resample_buf_size_256) : (self.demucs.resample*self.resample_buf_size_256 + self.demucs.resample*self.frame_length)]#[1,:2388]  # remove extra samples after window
         
         # note infer
-        out, extra = self._separate_frame(frame)#out:[1,1024] #extra:[1,1364]
+        self.out_1024, self.extra_1364 = self._separate_frame(self.frame_2388)#out:[1,1024] #extra:[1,1364]
 
         # post process
-        padded_out = th.cat([self.resample_out, out, extra], 1)#[1,2644]
-        self.resample_out[:] = out[:, -self.resample_buf_size_256:]#self.resample_out:[1,256]
+        self.paddedout_2644 = th.cat([self.resample_out, self.out_1024, self.extra_1364], 1)#[1,2644]
+        self.resample_out[:] = self.out_1024[:, -self.resample_buf_size_256:]#self.resample_out:[1,256]
         if self.demucs.resample == 4:
-            out = self._downsample2(self._downsample2(padded_out))#[1,661]
+            self.frame_661 = self._downsample2(self._downsample2(self.paddedout_2644))#[1,661]
         else:
             print("downresample error")
-        out = out[:, self.resample_buf_size_256 // self.demucs.resample:]#[1,597]
-        out = out[:, :self.stride_size]#[1,256]
+        self.output_tensor_256 = self.frame_661[:, (self.resample_buf_size_256 // self.demucs.resample) : (self.resample_buf_size_256 // self.demucs.resample + self.stride_size)]#[1,256]
 
         if self.demucs.normalize:
-            out *= math.sqrt(self.variance)
+            self.output_tensor_256 *= math.sqrt(self.variance)
 
         #output: Tensor[1,256]
-        return out.clone()
+        return self.output_tensor_256.clone()
 
     def _fast_conv(self, conv, x):
         """
