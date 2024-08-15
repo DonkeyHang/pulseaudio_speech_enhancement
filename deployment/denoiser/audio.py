@@ -67,7 +67,7 @@ class Audioset:
             if self.length is not None:
                 offset = self.stride * index
                 num_frames = self.length
-            out, sr = torchaudio.load(str(file), offset=offset, num_frames=num_frames)
+            out, sr = torchaudio.load(str(file), frame_offset=offset)
             # new resample
             Resample = torchaudio.transforms.Resample(orig_freq=sr)
             out = Resample(out)

@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 def get_dataset_fast_api_version(file_location):
     files = []
-    siginfo, _ = torchaudio.info(file_location)
-    length = siginfo.length // siginfo.channels
+    siginfo = torchaudio.info(file_location)
+    length = siginfo.num_frames // siginfo.num_channels
     files.append((file_location, length))
     return Audioset(files, with_path=True, sample_rate=48000)
 
@@ -80,7 +80,7 @@ def ut_my():
     # plt.plot(output)
     # plt.show()
 
-    print("process done")
+    print("process finish")
 
     xxx = 1
 
