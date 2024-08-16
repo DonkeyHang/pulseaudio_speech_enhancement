@@ -10,6 +10,7 @@ import torchaudio
 from torch.utils.data import DataLoader
 from demucs import Demucs, DemucsStreamer_RT
 
+
 from audio import Audioset
 from pretrained import add_model_flags, get_model
 from utils import LogProgress
@@ -146,6 +147,7 @@ def ut_only_demucs():
     import matplotlib.pyplot as plt
     import soundfile as sf
     import torch as th
+    import onnxruntime as ort
 
     
 
@@ -176,6 +178,8 @@ def ut_only_demucs():
 
     demucs = get_model(MODEL_PATH).to('cpu')
     demucs.eval()
+
+    ort_sess = ort.InferenceSession("model.onnx")
     
     for param in demucs.parameters():
         param.requirs_grad = False
@@ -189,6 +193,10 @@ def ut_only_demucs():
     process_buf_960 = th.as_tensor( np.zeros((1,PROCESS_SIZE_960)), dtype=th.float32 )
     frame_960 = th.as_tensor( np.zeros((1,960)), dtype=th.float32 )
     output_tensor_480 = th.as_tensor( np.zeros((1,480)),dtype=th.float32 )
+
+    export_onnx_already = False
+    input_name = ort_sess.get_inputs()[0].name
+    output_name = ort_sess.get_outputs()[0].name
 
 
     # ===================== processBlock simulink start===================
@@ -218,17 +226,34 @@ def ut_only_demucs():
             # preprocess
             frame_960 = process_buf_960.clone()# * vorbis_win_960
             
-            tmp_960 = demucs.forward(frame_960).squeeze(0)
+            # tmp_960 = demucs.forward(frame_960).squeeze(0)
+            # ============== onnx infer start ============
+            ort_res = ort_sess.run([output_name],{
+                input_name: frame_960.cpu().numpy()
+            })[0].squeeze(0)
+            # ============== onnx infer end ==============
+            
+            # ============== onnx export start============
+            # if(export_onnx_already==False):
+            #     th.onnx.export(
+            #         demucs,
+            #         frame_960,
+            #         "model.onnx"
+            #     )
+            #     export_onnx_already = True
+            # ============== onnx export end============
             
             # overlap 
-            output_tensor_480 = tmp_960[:,:STEP_SIZE_480]
+            # output_tensor_480 = tmp_960[:,:STEP_SIZE_480]
+            output_tensor_480 = ort_res[:,:STEP_SIZE_480]
             # ============================
 
 
 
             # push output into out_buf_960
             if out_buf_1024.available_to_write()>=STEP_SIZE_480:
-                out_buf_1024.write( output_tensor_480.detach().numpy() )
+                # out_buf_1024.write( output_tensor_480.detach().numpy() )
+                out_buf_1024.write( output_tensor_480 )
                 # out_buf_1024.write( output_tensor_256.detach().numpy() )
                 
             else:
