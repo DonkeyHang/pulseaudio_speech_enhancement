@@ -8,7 +8,7 @@ import os
 import sys
 import torchaudio
 from torch.utils.data import DataLoader
-from demucs import Demucs, DemucsStreamer_RT
+from demucs import Demucs#, DemucsStreamer_RT
 
 
 from audio import Audioset
@@ -155,22 +155,21 @@ def ut_only_demucs():
     MODEL_PATH = "/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/denoiser/best.th"
     SAVE_WAV_PATH = "/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/deployment/wav/result_only_demucs_noise_car_talk.wav"
     FRAME_SIZE_480 = 480
-    PROCESS_SIZE_661 = 661
+    # PROCESS_SIZE_661 = 661
     PROCESS_SIZE_960 = 960
-    STEP_SIZE_256 = 256
+    # STEP_SIZE_256 = 256
     STEP_SIZE_480 = 480
-    OUTPUT_FRAME_SIZE_256 = 256
+    # OUTPUT_FRAME_SIZE_256 = 256
 
 
     # load wav
-    dset = get_dataset_fast_api_version(FILE_WAV)
-    loader = DataLoader(dset, batch_size=1)
-    iterator = LogProgress(logger, loader, name="Generate enhanced files")
-    for data in iterator:
-        # Get all wav data
-        audio, filenames = data #audio:[1,160000] # audio samplerate is 48000
-    audio = audio.squeeze(0).to('cpu') 
+    audio, sr = torchaudio.load(str(FILE_WAV), frame_offset=0)
+    Resample = torchaudio.transforms.Resample(orig_freq=sr)
+    audio = Resample(audio)
+    # audio = audio.unsqueeze(0).to('cpu') 
+    audio = audio.to('cpu') # samplerate:16k
     audio_frame_num = audio.shape[1] // FRAME_SIZE_480
+    
 
     # output_buffer
     output = np.zeros(audio_frame_num*FRAME_SIZE_480)
@@ -210,13 +209,8 @@ def ut_only_demucs():
             print("in_buf_1024 push error")
 
         
-        # onnx_imlp = onnx.load
-        # input_name = ort_sess.get_inputs()[0].name
-        # output_name = ort_sess.get_outputs()[0].name
-        # process if buffer_size>661
         while(in_buf_1024.available_to_read() >= STEP_SIZE_480):
             tensor_buffer_256 = th.as_tensor(in_buf_1024.read(STEP_SIZE_480),dtype=th.float32)
-            
             
             # ============================
             # model inference once in here
@@ -274,6 +268,20 @@ def ut_only_demucs():
     xxx = 1
 
 
+def ut_onnxsim():
+    import onnx
+    from onnxsim import simplify
+
+    model = onnx.load("/Users/donkeyddddd/Documents/Rx_projects/git_projects/pulseaudio_speech_enhancement/model.onnx")
+
+    model_simp, check = simplify(model)
+
+    assert check, "Simplified ONNX model could not be validated"
+
+    print("onnx simplify done")
+
+
+
 
 
 # version with command line args
@@ -284,4 +292,5 @@ if __name__ == "__main__":
     # ut_my() # ok
 
     ut_only_demucs()
+    # ut_onnxsim()
 
