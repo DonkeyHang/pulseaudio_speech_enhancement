@@ -3,7 +3,19 @@
 #include <memory>
 #include <vector>
 #include <android/log.h>
-#include "../base/audio_ring_buffer.h"
+#include "../base/include/audio_ring_buffer.h"
+#include <android/asset_manager.h>
+#include "../base/include/rtns_model.h"
+
+#ifndef LOG_TAG
+#define LOG_TAG "donkey_debug"
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG,LOG_TAG ,__VA_ARGS__) // 定义LOGD类型
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,LOG_TAG ,__VA_ARGS__) // 定义LOGI类型
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,LOG_TAG ,__VA_ARGS__) // 定义LOGW类型
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR,LOG_TAG ,__VA_ARGS__) // 定义LOGE类型
+#define LOGF(...) __android_log_print(ANDROID_LOG_FATAL,LOG_TAG ,__VA_ARGS__) // 定义LOGF类型
+#endif
+
 
 typedef std::numeric_limits<int16_t> limits_int16;
 
@@ -26,68 +38,13 @@ static inline int16_t FloatToS16(float v) {
 
 class Realtime_NS{
 public:
-    Realtime_NS(){
-        __android_log_print(ANDROID_LOG_DEBUG, "donkey_debug Realtime_NS", "start construction");
+    Realtime_NS();
+    ~Realtime_NS();
 
-        pInBuffer_960.reset(new AudioRingBuffer(1,960));
-        pOutBuffer_960.reset(new AudioRingBuffer(1,960));
-        std::vector<float> mEmpty(480);
-        pOutBuffer_960->Write(mEmpty,1,480);
+    void initialModel(AAssetManager* manager);
 
-        mFloat32_160.resize(160);
-        mFloat32_480.resize(480);
-        mPorcessBuf_960.resize(960);
-        mCalc_480.resize(480);
+    void processBlock(int16_t* buffer, int len);
 
-        __android_log_print(ANDROID_LOG_DEBUG, "donkey_debug Realtime_NS", "end construction");
-    }
-
-    ~Realtime_NS(){}
-
-
-    void processBlock(int16_t* buffer, int len){
-        assert(len >0);
-
-        //int16 to float32 transfer
-        for(int idx=0;idx<len;idx++){
-            mFloat32_160.data()[idx] = S16ToFloat(buffer[idx]);
-        }
-
-        //======================
-        //ring buffer push data
-        if(pInBuffer_960->WriteFramesAvailable() >= 160){
-            pInBuffer_960->Write(mFloat32_160,1,160);
-        }
-
-        //=======================
-
-        while(pInBuffer_960->ReadFramesAvailable()>=480){
-            //process once
-            pInBuffer_960->Read(mFloat32_480,1,480);
-            std::copy(mPorcessBuf_960.begin()+480,mPorcessBuf_960.end(),mPorcessBuf_960.begin());
-            std::copy(mFloat32_480.begin(),mFloat32_480.end(),mPorcessBuf_960.begin()+480);
-
-            //=====================
-            //process model in here
-            std::copy(mPorcessBuf_960.begin(),mPorcessBuf_960.begin()+480,mCalc_480.begin());
-            //====================
-
-            if(pOutBuffer_960->WriteFramesAvailable()>=480){
-                pOutBuffer_960->Write(mCalc_480,1,480);
-            }
-        }
-
-        //======================
-        //ring buffer get data
-        if(pOutBuffer_960->ReadFramesAvailable()>=160){
-            pOutBuffer_960->Read(mFloat32_160,1,160);
-        }
-
-        for(int idx=0;idx<len;idx++){
-            buffer[idx] = FloatToS16(mFloat32_160.data()[idx]);
-        }
-
-    }
 
 private:
     std::unique_ptr<AudioRingBuffer> pInBuffer_960 = nullptr;
@@ -96,5 +53,7 @@ private:
     std::vector<float> mFloat32_480;
     std::vector<float> mPorcessBuf_960;
     std::vector<float> mCalc_480;
+
+    std::unique_ptr<MNNModel> pModel = nullptr;
 
 };

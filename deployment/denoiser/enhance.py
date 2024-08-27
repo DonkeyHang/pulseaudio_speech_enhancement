@@ -232,7 +232,9 @@ def ut_only_demucs():
             #     th.onnx.export(
             #         demucs,
             #         frame_960,
-            #         "model.onnx"
+            #         "model.onnx",
+            #         input_names=["input"],
+            #         output_names=["output"]
             #     )
             #     export_onnx_already = True
             # ============== onnx export end============

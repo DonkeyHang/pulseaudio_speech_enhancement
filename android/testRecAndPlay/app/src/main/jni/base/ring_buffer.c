@@ -1,4 +1,4 @@
-#include "ring_buffer.h"
+#include "include/ring_buffer.h"
 
 #include <stddef.h>  // size_t
 #include <stdlib.h>

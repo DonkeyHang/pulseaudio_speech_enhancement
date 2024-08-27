@@ -3,6 +3,9 @@
 #include <android/log.h>
 
 #include "rt_impl.h"
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
+#include <memory>
 
 #ifndef LOG_TAG
 #define LOG_TAG "donkey_debug"
@@ -22,6 +25,7 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_com_example_testRecAndPlay_RealtimeNS_initial(
         JNIEnv *env, jobject instance,
+        jobject assetmanager,
         jfloat samplerate){
 
 //    __android_log_print(ANDROID_LOG_DEBUG, "donkey_debug", "initial start");
@@ -29,14 +33,29 @@ Java_com_example_testRecAndPlay_RealtimeNS_initial(
     if(pRealtime_NS_static_pointer){
         //wild pointer dirty objects
         LOGE("donkey_debug jni init","start initial jni if start");
-//        pRealtime_NS_static_pointer->setCoef(gain,cutoff,Q,samplerate);
-//        __android_log_print(ANDROID_LOG_DEBUG, "donkey_debug", "initial reset and bufferLen");
+
         LOGE("donkey_debug jni init","start initial jni if end");
     }else{
         //new objects
         LOGE("donkey_debug","start initial jni pos else start");
+        AAssetManager* manager = AAssetManager_fromJava(env, assetmanager);
+
         pRealtime_NS_static_pointer = new Realtime_NS();
-//        pLP_static_pointer->setCoef(gain,cutoff,Q,samplerate);
+        pRealtime_NS_static_pointer->initialModel(manager);
+
+
+
+
+
+        //==================
+
+        //==================
+
+
+
+
+
+
         LOGE("donkey_debug","start initial jni pos else end");
 //        __android_log_print(ANDROID_LOG_DEBUG, "donkey_debug", "initial new and bufferLen");
     }

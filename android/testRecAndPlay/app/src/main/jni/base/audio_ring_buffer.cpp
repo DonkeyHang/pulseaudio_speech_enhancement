@@ -1,5 +1,5 @@
-#include "audio_ring_buffer.h"
-#include "ring_buffer.h"
+#include "include/audio_ring_buffer.h"
+#include "include/ring_buffer.h"
 
 // This is a simple multi-channel wrapper over the ring_buffer.h C interface.
 

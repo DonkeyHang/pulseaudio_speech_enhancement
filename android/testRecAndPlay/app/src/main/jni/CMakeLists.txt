@@ -16,24 +16,44 @@ set(CMAKE_CXX_FLAGS_DEBUG "-g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 #=============
 
-find_library(log-lib log)
+find_library(log_lib log)
+find_library(android_lib android)
 
 include_directories(
-     include
-     source
-     ${CMAKE_SOURCE_DIR}/base/define_variables.h
-     ${CMAKE_SOURCE_DIR}/base/audio_ring_buffer.h
-     ${CMAKE_SOURCE_DIR}/base/ring_buffer.h
-     ${CMAKE_SOURCE_DIR}/impl/rt_impl.h
+     ${CMAKE_SOURCE_DIR}/base/include/
+#     ${CMAKE_SOURCE_DIR}/base/include/define_variables.h
+#     ${CMAKE_SOURCE_DIR}/base/include/audio_ring_buffer.h
+#     ${CMAKE_SOURCE_DIR}/base/include/ring_buffer.h
+#     ${CMAKE_SOURCE_DIR}/impl/include/rtns_model.h
+#     ${CMAKE_SOURCE_DIR}/impl/rt_impl.h
+#     ${CMAKE_SOURCE_DIR}/base/include/MNN
 )
 
 file(
      GLOB src-files
      ${CMAKE_SOURCE_DIR}/base/ring_buffer.c
      ${CMAKE_SOURCE_DIR}/base/audio_ring_buffer.cpp
+     ${CMAKE_SOURCE_DIR}/base/rtns_model.cpp
      ${CMAKE_SOURCE_DIR}/impl/jni_rt_impl.cpp
-
+     ${CMAKE_SOURCE_DIR}/impl/rt_impl.cpp
 )
+
+# mnn
+#include_directories(${CMAKE_SOURCE_DIR}/MNN/include)
+#include_directories(${CMAKE_SOURCE_DIR}/MNN/include/expr/)
+add_library(libMNN SHARED IMPORTED)
+add_library(libMNN_CL SHARED IMPORTED)
+add_library(libMNN_Express SHARED IMPORTED)
+set_target_properties(
+        libMNN
+        libMNN_CL
+        libMNN_Express
+        PROPERTIES IMPORTED_LOCATION
+        ${CMAKE_SOURCE_DIR}/libs/MNN/${ANDROID_ABI}/libMNN.so
+        ${CMAKE_SOURCE_DIR}/libs/MNN/${ANDROID_ABI}/libMNN_CL.so
+        ${CMAKE_SOURCE_DIR}/libs/MNN/${ANDROID_ABI}/libMNN_Express.so
+)
+
 
 # 编译为动态库
 add_library(
@@ -43,7 +63,11 @@ add_library(
 
 target_link_libraries(
         rt_ns
-        log
+        ${log_lib}
+        ${android_lib}
+        libMNN
+        libMNN_CL
+        libMNN_Express
 )
 
 set_target_properties(

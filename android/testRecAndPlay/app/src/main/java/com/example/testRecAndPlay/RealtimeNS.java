@@ -1,5 +1,6 @@
 package com.example.testRecAndPlay;
 
+import android.content.res.AssetManager;
 import android.util.Log;
 
 public class RealtimeNS {
@@ -7,7 +8,8 @@ public class RealtimeNS {
         System.loadLibrary("rt_ns");
     }
 
-    public static native void initial(float sr);
+    public static native void initial(AssetManager assetmanager, float sr);
+//    public static native void initial(float sr);
 
     public static native void processBlock(short[] buffer_s16, int len);
 

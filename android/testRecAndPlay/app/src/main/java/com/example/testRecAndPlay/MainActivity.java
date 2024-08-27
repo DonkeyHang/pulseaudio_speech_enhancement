@@ -27,6 +27,8 @@ import android.support.v4.content.ContextCompat;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
+import android.content.res.AssetManager;
+
 
 //=================================================
 public class MainActivity extends AppCompatActivity {
@@ -40,6 +42,8 @@ public class MainActivity extends AppCompatActivity {
     private int bufferSize;
 
     private RealtimeNS rt_ns;
+
+    private AssetManager assetmanager;
 
     private float[] hammingWindow48to16;  // Window for downsample from 48k to 16k
     private float[] hammingWindow16to48;
@@ -63,9 +67,13 @@ public class MainActivity extends AppCompatActivity {
         });
 
         initHammingWindows();
+
+        assetmanager = getAssets();
+
         rt_ns = new RealtimeNS();
         rt_ns.debugxxxx();
-        rt_ns.initial(48000);
+        rt_ns.initial(assetmanager,48000);
+//        rt_ns.initial(48000);
 
 
 
