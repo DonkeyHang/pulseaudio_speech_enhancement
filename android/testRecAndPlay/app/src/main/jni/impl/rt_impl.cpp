@@ -62,10 +62,8 @@ void Realtime_NS::processBlock(int16_t* buffer, int len){
         std::copy(mFloat32_480.begin(),mFloat32_480.end(),mPorcessBuf_960.begin()+480);
 
         //=====================
-        //process model in here
-//        std::copy(mPorcessBuf_960.begin(),mPorcessBuf_960.begin()+480,mCalc_480.begin());
+        //model inference process  in here
         pModel->inference(mPorcessBuf_960,mCalc_480,"output");
-
         //====================
 
         if(pOutBuffer_960->WriteFramesAvailable()>=480){

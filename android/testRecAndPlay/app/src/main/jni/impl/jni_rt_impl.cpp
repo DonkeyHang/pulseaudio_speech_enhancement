@@ -43,19 +43,6 @@ Java_com_example_testRecAndPlay_RealtimeNS_initial(
         pRealtime_NS_static_pointer = new Realtime_NS();
         pRealtime_NS_static_pointer->initialModel(manager);
 
-
-
-
-
-        //==================
-
-        //==================
-
-
-
-
-
-
         LOGE("donkey_debug","start initial jni pos else end");
 //        __android_log_print(ANDROID_LOG_DEBUG, "donkey_debug", "initial new and bufferLen");
     }
